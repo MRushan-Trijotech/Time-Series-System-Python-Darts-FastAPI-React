@@ -1,0 +1,38 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "MRushan-Trijotech", email = "mohd.rushan@trijotech.com" }
+]
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "aiofiles>=25.1.0",
+    "darts[notorch]",
+    "fastapi>=0.159.1",
+    "matplotlib",
+    "numpy",
+    "openpyxl>=3.1.5",
+    "pandas",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.16.1",
+    "python-multipart>=0.0.32",
+    "scikit-learn",
+    "statsmodels",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+backend = "backend:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
