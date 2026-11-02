@@ -15,10 +15,13 @@ from darts.models import (
     AutoETS,
     ExponentialSmoothing,
     LinearRegressionModel,
+    NaiveDrift,
+    NaiveMean,
     NaiveSeasonal,
     Prophet,
     RandomForestModel,
 )
+from darts.utils.utils import ModelMode
 
 SEED = 42
 
@@ -43,11 +46,13 @@ except ImportError:
 
 # Minimum observations required for a model to run
 MODEL_MIN_OBS: dict[str, int] = {
+    "NaiveMean": 2,
+    "NaiveDrift": 3,
     "NaiveSeasonal": 13,
     "ARIMA": 10,
     "AutoARIMA": 10,
-    "ExponentialSmoothing": 8,
-    "AutoETS": 8,
+    "ExponentialSmoothing": 3,
+    "AutoETS": 10,
     "Prophet": 10,
     "LinearRegressionModel": 25,
     "RandomForestModel": 25,
@@ -58,6 +63,8 @@ MODEL_MIN_OBS: dict[str, int] = {
 
 # Model family description for display
 MODEL_FAMILY: dict[str, str] = {
+    "NaiveMean": "Baseline",
+    "NaiveDrift": "Baseline",
     "NaiveSeasonal": "Baseline",
     "ARIMA": "Statistical",
     "AutoARIMA": "Statistical",
@@ -74,6 +81,8 @@ MODEL_FAMILY: dict[str, str] = {
 
 def _build_registry() -> dict[str, Callable]:
     registry: dict[str, Callable] = {
+        "NaiveMean": lambda: NaiveMean(),
+        "NaiveDrift": lambda: NaiveDrift(),
         "NaiveSeasonal": lambda: NaiveSeasonal(K=12),
         "ARIMA": lambda: ARIMA(p=2, d=1, q=1),
         "AutoARIMA": lambda: AutoARIMA(
@@ -84,7 +93,7 @@ def _build_registry() -> dict[str, Callable]:
             max_P=1,
             max_Q=1,
         ),
-        "ExponentialSmoothing": lambda: ExponentialSmoothing(),
+        "ExponentialSmoothing": lambda: ExponentialSmoothing(trend=ModelMode.ADDITIVE, seasonal=ModelMode.NONE),
         "AutoETS": lambda: AutoETS(season_length=12),
         "Prophet": lambda: Prophet(
             yearly_seasonality=True,
@@ -178,6 +187,7 @@ def filter_eligible_models(
     Return the subset of requested models that:
     - are available (package installed)
     - have enough training observations
+    If no requested model qualifies (e.g. very short series), fallback to robust baselines.
     """
     if requested is None:
         requested = list(CANDIDATE_MODELS.keys())
@@ -192,5 +202,13 @@ def filter_eligible_models(
         min_obs = MODEL_MIN_OBS.get(name, 10)
         if n_train_observations >= min_obs:
             eligible.append(name)
+
+    # Always ensure at least one model can run so training never crashes on short series
+    if not eligible:
+        if n_train_observations >= 3:
+            eligible = ["ExponentialSmoothing", "NaiveDrift", "NaiveMean"]
+        elif n_train_observations >= 2:
+            eligible = ["NaiveMean"]
+
     return eligible
 
