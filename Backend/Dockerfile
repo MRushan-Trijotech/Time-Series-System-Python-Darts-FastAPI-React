@@ -12,10 +12,16 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
 # Copy pyproject.toml & lock file
 COPY pyproject.toml uv.lock* ./
-RUN uv sync --frozen --no-dev || uv pip install -e .
 
-# Copy backend source code & sample data
+# Install third-party dependencies first without the root package
+# (avoids: "Expected a Python module at: src/backend/__init__.py")
+RUN uv sync --frozen --no-dev --no-install-project
+
+# Copy backend source code
 COPY src ./src
+
+# Install root project into the virtual environment
+RUN uv sync --frozen --no-dev
 
 ENV PORT=8000
 ENV PYTHONUNBUFFERED=1
@@ -24,4 +30,3 @@ EXPOSE 8000
 
 # Start Uvicorn bound to Render dynamic $PORT
 CMD ["sh", "-c", "uv run uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
-
