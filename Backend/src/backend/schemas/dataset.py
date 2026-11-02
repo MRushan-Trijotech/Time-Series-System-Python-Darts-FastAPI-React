@@ -50,3 +50,17 @@ class SeriesPreviewResponse(BaseModel):
     date_range_end: str
     warnings: list[str]
 
+
+class SeriesInfoRequest(BaseModel):
+    filters: dict[str, list[str]] = {}
+    bu_entities: dict[str, list[str]] | None = None
+    accounts: list[str] | None = None
+
+
+class SeriesInfoResponse(BaseModel):
+    n_observations: int
+    date_range_start: str
+    date_range_end: str
+    recommended_horizon: int
+    warnings: list[str]
+

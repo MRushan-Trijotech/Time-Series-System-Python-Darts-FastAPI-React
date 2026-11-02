@@ -126,4 +126,39 @@ def test_full_pipeline_with_story_xlsx():
     # CSV Export
     csv_resp = client.get(f"/api/reports/{job_id}/export/forecast.csv")
     assert csv_resp.status_code == 200
-    assert "Forecast Value" in csv_resp.text
+    assert "Forecasted Value" in csv_resp.text
+    assert "Change vs Previous Period" in csv_resp.text
+    assert "Change (%)" in csv_resp.text
+
+    # 7. Entity-wise Background Report
+    entity_completed = False
+    for _ in range(60):
+        ent_resp = client.get(f"/api/reports/{job_id}/entity-wise")
+        assert ent_resp.status_code == 200
+        ent_data = ent_resp.json()
+        if ent_data["status"] == "completed":
+            entity_completed = True
+            break
+        elif ent_data["status"] == "failed":
+            pytest.fail(f"Entity-wise training failed: {ent_data.get('error')}")
+        time.sleep(0.5)
+
+    assert entity_completed, "Entity-wise background training timed out"
+    assert ent_data["data"] is not None
+    assert len(ent_data["data"]["months"]) == 6
+    assert len(ent_data["data"]["hierarchy"]) == 6
+
+    # Entity-wise Story-style CSV Export
+    ent_csv_resp = client.get(f"/api/reports/{job_id}/export/entity-wise.csv")
+    assert ent_csv_resp.status_code == 200
+    assert "Date" in ent_csv_resp.text
+    assert "(all)" in ent_csv_resp.text
+    assert "Business unit" in ent_csv_resp.text
+    assert "SAC_Legal_Entity" in ent_csv_resp.text
+    assert "ACCOUNT" in ent_csv_resp.text
+    assert "Description" in ent_csv_resp.text
+
+    # Entity-wise Story-style XLSX Export
+    ent_xlsx_resp = client.get(f"/api/reports/{job_id}/export/entity-wise.xlsx")
+    assert ent_xlsx_resp.status_code == 200
+    assert len(ent_xlsx_resp.content) > 500

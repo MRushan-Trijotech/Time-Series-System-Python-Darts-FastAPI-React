@@ -1,6 +1,17 @@
 import React, { createContext, useContext, useState } from 'react'
 import type { TransformResponse } from '../types'
 
+export interface ForecastConfigState {
+  businessUnits: string[]
+  buEntities: Record<string, string[]>
+  targetAccount: string | null
+  targetLabel: string | null
+  trainStart: string
+  trainEnd: string
+  forecastHorizon: number
+  totalObservations?: number
+}
+
 interface SessionContextType {
   datasetId: string | null
   setDatasetId: (id: string | null) => void
@@ -14,6 +25,12 @@ interface SessionContextType {
   setTransformData: (data: TransformResponse | null) => void
   jobId: string | null
   setJobId: (id: string | null) => void
+  jobCompleted: boolean
+  setJobCompleted: (done: boolean) => void
+  entityStatus: 'idle' | 'pending' | 'running' | 'completed' | 'failed'
+  setEntityStatus: (status: 'idle' | 'pending' | 'running' | 'completed' | 'failed') => void
+  forecastConfig: ForecastConfigState | null
+  setForecastConfig: (config: ForecastConfigState | null) => void
   resetSession: () => void
 }
 
@@ -26,6 +43,9 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [sheetNames, setSheetNames] = useState<string[]>([])
   const [transformData, setTransformData] = useState<TransformResponse | null>(null)
   const [jobId, setJobId] = useState<string | null>(null)
+  const [jobCompleted, setJobCompleted] = useState<boolean>(false)
+  const [entityStatus, setEntityStatus] = useState<'idle' | 'pending' | 'running' | 'completed' | 'failed'>('idle')
+  const [forecastConfig, setForecastConfig] = useState<ForecastConfigState | null>(null)
 
   const resetSession = () => {
     setDatasetId(null)
@@ -34,6 +54,9 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setSheetNames([])
     setTransformData(null)
     setJobId(null)
+    setJobCompleted(false)
+    setEntityStatus('idle')
+    setForecastConfig(null)
   }
 
   return (
@@ -51,6 +74,12 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setTransformData,
         jobId,
         setJobId,
+        jobCompleted,
+        setJobCompleted,
+        entityStatus,
+        setEntityStatus,
+        forecastConfig,
+        setForecastConfig,
         resetSession,
       }}
     >

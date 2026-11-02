@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
   LayoutDashboard,
@@ -8,11 +8,34 @@ import {
   TrendingUp,
   HelpCircle,
   CheckCircle2,
+  Layers,
+  Loader2,
 } from 'lucide-react'
+import { getEntityWiseReport } from '../../api/client'
 import { useSession } from '../../contexts/SessionContext'
 
 export const Sidebar: React.FC = () => {
-  const { datasetId, transformData, jobId } = useSession()
+  const { datasetId, transformData, jobId, jobCompleted, entityStatus, setEntityStatus } = useSession()
+
+  // Background poller for entity training status so sidebar updates reactively
+  useEffect(() => {
+    if (!jobId || !jobCompleted || entityStatus === 'completed' || entityStatus === 'failed') return
+
+    const checkStatus = async () => {
+      try {
+        const res = await getEntityWiseReport(jobId)
+        if (res?.status) {
+          setEntityStatus(res.status)
+        }
+      } catch {
+        // Job or entity status not ready yet
+      }
+    }
+
+    checkStatus()
+    const interval = setInterval(checkStatus, 2000)
+    return () => clearInterval(interval)
+  }, [jobId, jobCompleted, entityStatus, setEntityStatus])
 
   const navItems = [
     {
@@ -21,6 +44,7 @@ export const Sidebar: React.FC = () => {
       icon: LayoutDashboard,
       enabled: true,
       done: false,
+      isPending: false,
     },
     {
       to: '/upload',
@@ -28,6 +52,7 @@ export const Sidebar: React.FC = () => {
       icon: UploadCloud,
       enabled: true,
       done: !!transformData,
+      isPending: false,
     },
     {
       to: '/configure',
@@ -35,27 +60,39 @@ export const Sidebar: React.FC = () => {
       icon: Sliders,
       enabled: !!transformData,
       done: !!jobId,
+      isPending: false,
     },
     {
       to: '/training',
       label: '3. Model Training',
       icon: PlayCircle,
       enabled: !!jobId,
-      done: false,
+      done: jobCompleted,
+      isPending: false,
     },
     {
       to: '/report/forecast',
       label: '4. Forecast Report',
       icon: TrendingUp,
-      enabled: !!jobId,
-      done: false,
+      enabled: jobCompleted,
+      done: jobCompleted,
+      isPending: false,
     },
     {
       to: '/report/explanation',
       label: '5. Explanation Report',
       icon: HelpCircle,
-      enabled: !!jobId,
-      done: false,
+      enabled: jobCompleted,
+      done: jobCompleted,
+      isPending: false,
+    },
+    {
+      to: '/report/entity-wise',
+      label: '6. Entity-wise Report',
+      icon: Layers,
+      enabled: jobCompleted,
+      done: entityStatus === 'completed',
+      isPending: jobCompleted && entityStatus !== 'completed' && entityStatus !== 'failed',
     },
   ]
 
@@ -99,6 +136,12 @@ export const Sidebar: React.FC = () => {
                   </div>
                   {item.done && (
                     <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                  )}
+                  {item.isPending && (
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 shadow-2xs">
+                      <Loader2 className="w-3 h-3 text-amber-500 animate-spin" />
+                      <span>Pending</span>
+                    </span>
                   )}
                 </NavLink>
               )

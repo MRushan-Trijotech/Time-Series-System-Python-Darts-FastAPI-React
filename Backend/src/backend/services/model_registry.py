@@ -12,7 +12,6 @@ from typing import Callable
 from darts.models import (
     ARIMA,
     AutoARIMA,
-    AutoCES,
     AutoETS,
     ExponentialSmoothing,
     LinearRegressionModel,
@@ -49,7 +48,6 @@ MODEL_MIN_OBS: dict[str, int] = {
     "AutoARIMA": 10,
     "ExponentialSmoothing": 8,
     "AutoETS": 8,
-    "AutoCES": 8,
     "Prophet": 10,
     "LinearRegressionModel": 25,
     "RandomForestModel": 25,
@@ -65,7 +63,6 @@ MODEL_FAMILY: dict[str, str] = {
     "AutoARIMA": "Statistical",
     "ExponentialSmoothing": "Statistical",
     "AutoETS": "Statistical",
-    "AutoCES": "Statistical",
     "Prophet": "Statistical",
     "LinearRegressionModel": "Machine Learning",
     "RandomForestModel": "Machine Learning",
@@ -89,7 +86,6 @@ def _build_registry() -> dict[str, Callable]:
         ),
         "ExponentialSmoothing": lambda: ExponentialSmoothing(),
         "AutoETS": lambda: AutoETS(season_length=12),
-        "AutoCES": lambda: AutoCES(season_length=12),
         "Prophet": lambda: Prophet(
             yearly_seasonality=True,
             weekly_seasonality=False,

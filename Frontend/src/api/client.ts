@@ -8,6 +8,7 @@ import type {
   JobStatus,
   TransformResponse,
   UploadResponse,
+  EntityWiseReportResponse,
 } from '../types'
 
 export const api = axios.create({
@@ -60,14 +61,38 @@ export const getAvailableModels = async (): Promise<{ models: CandidateModelInfo
   return res.data
 }
 
+export const getSeriesInfo = async (
+  datasetId: string,
+  params: {
+    bu_entities?: Record<string, string[]>
+    accounts?: string[]
+    filters?: Record<string, string[]>
+  }
+): Promise<{
+  n_observations: number
+  date_range_start: string
+  date_range_end: string
+  recommended_horizon: number
+  warnings: string[]
+}> => {
+  const res = await api.post(`/datasets/${datasetId}/series-info`, {
+    bu_entities: params.bu_entities,
+    accounts: params.accounts,
+    filters: params.filters || {},
+  })
+  return res.data
+}
+
 export const startTraining = async (params: {
   dataset_id: string
   filters?: Record<string, string[]>
   bu_entities?: Record<string, string[]>
   accounts?: string[]
   forecast_horizon: number
-  validation_split: number
+  validation_split?: number
   candidate_models?: string[]
+  train_start?: string
+  train_end?: string
 }): Promise<{ job_id: string; status: string }> => {
   const res = await api.post<{ job_id: string; status: string }>('/training', params)
   return res.data
@@ -85,6 +110,11 @@ export const getForecastReport = async (jobId: string): Promise<ForecastReport> 
 
 export const getExplanationReport = async (jobId: string): Promise<ExplanationReport> => {
   const res = await api.get<ExplanationReport>(`/reports/${jobId}/explanation`)
+  return res.data
+}
+
+export const getEntityWiseReport = async (jobId: string): Promise<EntityWiseReportResponse> => {
+  const res = await api.get<EntityWiseReportResponse>(`/reports/${jobId}/entity-wise`)
   return res.data
 }
 

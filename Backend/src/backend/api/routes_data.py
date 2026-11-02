@@ -11,6 +11,8 @@ from backend.schemas.dataset import (
     DimensionValues,
     SeriesPreviewRequest,
     SeriesPreviewResponse,
+    SeriesInfoRequest,
+    SeriesInfoResponse,
 )
 from backend.schemas.upload import (
     ColumnInfo,
@@ -325,3 +327,107 @@ async def series_preview(dataset_id: str, req: SeriesPreviewRequest):
         warnings=warnings,
     )
 
+
+
+@router.post("/datasets/{dataset_id}/series-info", response_model=SeriesInfoResponse)
+async def get_series_info(dataset_id: str, req: SeriesInfoRequest):
+    """
+    Return the aggregate series date range and observation count for the given
+    BU / entity / account selection, with missing months filled to 0.
+    Used by the Configuration page to show series span and recommend a horizon.
+    """
+    record = get_dataset(dataset_id)
+    if not record or not record.transform_result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Transformed dataset not found.",
+        )
+
+    df = record.transform_result.long_df.copy()
+    dim_cols = record.transform_result.dimension_columns
+    warnings_out: list[str] = []
+
+    bu_col = next((c for c in dim_cols if "business unit" in c.lower()), None)
+    ent_col = next((c for c in dim_cols if "legal_entity" in c.lower() or "legal entity" in c.lower()), None)
+    acc_col = next((c for c in dim_cols if c.lower() == "account"), None)
+
+    # Hierarchical BU + Legal Entity filter
+    if req.bu_entities and bu_col and ent_col and bu_col in df.columns and ent_col in df.columns:
+        masks = []
+        for bu, entities in req.bu_entities.items():
+            if entities:
+                masks.append((df[bu_col] == bu) & (df[ent_col].isin(entities)))
+            else:
+                masks.append(df[bu_col] == bu)
+        if masks:
+            comb = masks[0]
+            for m in masks[1:]:
+                comb = comb | m
+            df = df[comb]
+
+    # Account filter
+    if req.accounts and acc_col and acc_col in df.columns:
+        df = df[df[acc_col].isin(req.accounts)]
+
+    # Other filters
+    for dim, vals in req.filters.items():
+        if req.bu_entities and dim in [bu_col, ent_col]:
+            continue
+        if req.accounts and dim in [acc_col, "Description", "description"]:
+            continue
+        if dim in df.columns and vals:
+            df = df[df[dim].isin(vals)]
+
+    if df.empty:
+        return SeriesInfoResponse(
+            n_observations=0,
+            date_range_start="",
+            date_range_end="",
+            recommended_horizon=0,
+            warnings=["No data matches the selected filters."],
+        )
+
+    # Aggregate by date, fill missing months with 0
+    agg = (
+        df.groupby("date", dropna=True)["value"]
+        .sum(min_count=1)
+        .reset_index()
+        .sort_values("date")
+    )
+
+    # STRICT RULE: Identify observations with real data (not null and not 0)
+    valid_points = agg[agg["value"].notna() & (agg["value"] != 0)]
+    if valid_points.empty:
+        return SeriesInfoResponse(
+            n_observations=0,
+            date_range_start="",
+            date_range_end="",
+            recommended_horizon=0,
+            warnings=["No historical data available for this target (all values are empty or zero)."],
+        )
+
+    # Actual starting and ending months where real observations exist
+    first_date = valid_points["date"].min()
+    last_date = valid_points["date"].max()
+
+    # Slice strictly between first_date and last_date (in-between gaps filled with 0)
+    series_df = agg[(agg["date"] >= first_date) & (agg["date"] <= last_date)].copy()
+    series_df["value"] = series_df["value"].fillna(0)
+
+    n_obs = len(series_df)
+    d_start = first_date.strftime("%Y-%m-%d")
+    d_end = last_date.strftime("%Y-%m-%d")
+
+    # Recommend horizon: if 36 months -> 6, otherwise floor(n_obs / 4), minimum 1, capped at 36
+    if n_obs == 36:
+        recommended = 6
+    else:
+        recommended = max(1, min(36, n_obs // 4))
+
+    return SeriesInfoResponse(
+        n_observations=n_obs,
+        date_range_start=d_start,
+        date_range_end=d_end,
+        recommended_horizon=recommended,
+        warnings=warnings_out,
+    )

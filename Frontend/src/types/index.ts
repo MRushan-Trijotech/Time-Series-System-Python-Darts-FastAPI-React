@@ -112,22 +112,33 @@ export interface ForecastPoint {
   upper_bound?: number | null
 }
 
+export interface ConfigurationSummary {
+  business_units: string[]
+  bu_entities: Record<string, string[]>
+  accounts: string[]
+  forecast_horizon: number
+  train_start: string
+  train_end: string
+  total_observations: number
+}
+
 export interface ForecastReport {
   job_id: string
-  best_model: string
-  selection_metric: string
-  validation: {
+  configuration?: ConfigurationSummary
+  best_model?: string
+  selection_metric?: string
+  validation?: {
     start: string
     end: string
     mape: number | null
     mae: number | null
     rmse: number | null
   }
-  candidate_results: CandidateResult[]
+  candidate_results?: CandidateResult[]
   historical: HistoricalPoint[]
-  validation_series: ValidationPoint[]
+  validation_series?: ValidationPoint[]
   forecast: ForecastPoint[]
-  warnings: string[]
+  warnings?: string[]
 }
 
 export interface TrendInfo {
@@ -151,13 +162,70 @@ export interface ACFInfo {
 
 export interface ExplanationReport {
   job_id: string
-  best_model: string
-  model_family: string
-  why_selected: string
+  configuration?: ConfigurationSummary
+  best_model?: string
+  model_family?: string
+  why_selected?: string
   trend: TrendInfo | null
   seasonality: SeasonalityInfo | null
   acf: ACFInfo | null
-  data_warnings: string[]
-  limitations: string[]
+  data_warnings?: string[]
+  limitations?: string[]
+}
+
+export interface EntityWiseEntity {
+  entity: string
+  forecast: number
+  distribution_pct: number
+  best_model: string
+  mape: number | null
+}
+
+export interface EntityWiseBusinessUnit {
+  business_unit: string
+  forecast: number
+  distribution_pct: number
+  best_model: string
+  mape: number | null
+  entities: EntityWiseEntity[]
+}
+
+export interface EntityWiseMonth {
+  month: string
+  total_forecast: number
+  distribution_pct: number
+  business_units: EntityWiseBusinessUnit[]
+}
+
+export interface EntityForecastItem {
+  business_unit: string
+  entity: string
+  account: string
+  description: string
+  forecast: Record<string, number>
+  best_model: string
+}
+
+export interface EntityWiseReportData {
+  months: string[]
+  hierarchy: EntityWiseMonth[]
+  entity_forecasts?: EntityForecastItem[]
+  target_account?: string
+  target_description?: string
+  total_segments: number
+  total_business_units: number
+}
+
+export interface EntityWiseReportResponse {
+  job_id: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  progress: {
+    completed: number
+    total: number
+    current_segment: string
+    percent: number
+  }
+  error: string | null
+  data: EntityWiseReportData | null
 }
 

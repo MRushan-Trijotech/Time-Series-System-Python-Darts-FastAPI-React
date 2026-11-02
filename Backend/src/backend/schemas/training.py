@@ -9,15 +9,17 @@ class TrainingRequest(BaseModel):
     filters: dict[str, list[str]] = Field(default_factory=dict)
     bu_entities: dict[str, list[str]] | None = None  # { "BU": ["entity1", "entity2"] }
     accounts: list[str] | None = None  # ["PL01", ...]
-    forecast_horizon: int = Field(default=12, ge=1, le=60)
+    forecast_horizon: int = Field(default=12, ge=1, le=100)
     validation_split: float = Field(default=0.75, gt=0, lt=1)
     candidate_models: list[str] | None = None  # None = use all available
+    train_start: str | None = None  # ISO date string "YYYY-MM-DD", optional date range filter
+    train_end: str | None = None    # ISO date string "YYYY-MM-DD"
 
     @field_validator("forecast_horizon")
     @classmethod
     def horizon_reasonable(cls, v: int) -> int:
-        if v < 1 or v > 60:
-            raise ValueError("Forecast horizon must be between 1 and 60")
+        if v < 1 or v > 100:
+            raise ValueError("Forecast horizon must be between 1 and 100")
         return v
 
 

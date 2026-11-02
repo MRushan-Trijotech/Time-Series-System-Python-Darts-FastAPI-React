@@ -31,6 +31,8 @@ def build_aggregate_series(
     frequency: str = "MS",
     bu_entities: dict[str, list[str]] | None = None,
     accounts: list[str] | None = None,
+    train_start: str | None = None,
+    train_end: str | None = None,
 ) -> SeriesBuildResult:
     """
     Apply filters to long_df, aggregate values by date (sum),
@@ -44,6 +46,8 @@ def build_aggregate_series(
     frequency : pandas frequency string (default "MS" = month-start)
     bu_entities : dict of Business unit -> list of selected legal entities for that BU
     accounts : list of selected ACCOUNT codes
+    train_start : optional ISO date string to restrict series start (fills missing with 0)
+    train_end : optional ISO date string to restrict series end (fills missing with 0)
     """
     warnings: list[str] = []
     df = long_df.copy()
@@ -98,19 +102,35 @@ def build_aggregate_series(
         .sort_values("date")
     )
 
-    missing_dates = int(agg["value"].isna().sum())
-    if missing_dates > 0:
-        warnings.append(
-            f"{missing_dates} dates have no non-null values after aggregation "
-            "and will appear as NaN in the series."
+    # STRICT RULE: Identify observations with real data (not null and not 0)
+    valid_points = agg[agg["value"].notna() & (agg["value"] != 0)]
+    if valid_points.empty:
+        raise ValueError(
+            "No historical data available for this selection (all values are empty or zero)."
         )
+
+    first_avail = valid_points["date"].min()
+    last_avail = valid_points["date"].max()
+
+    eff_start = max(first_avail, pd.Timestamp(train_start)) if train_start else first_avail
+    eff_end = min(last_avail, pd.Timestamp(train_end)) if train_end else last_avail
+
+    if eff_start > eff_end:
+        raise ValueError(
+            f"Selected training range ({train_start} to {train_end}) does not overlap with available data "
+            f"({first_avail.strftime('%Y-%m')} to {last_avail.strftime('%Y-%m')})."
+        )
+
+    # Slice between eff_start and eff_end; fill in-between gaps with 0
+    agg = agg[(agg["date"] >= eff_start) & (agg["date"] <= eff_end)].copy()
+    agg["value"] = agg["value"].fillna(0)
 
     # Drop rows with NaN values (Darts requires no NaN for most models)
     agg_clean = agg.dropna(subset=["value"])
 
     if len(agg_clean) < 2:
         raise ValueError(
-            f"Only {len(agg_clean)} non-null observations after aggregation. "
+            f"Only {len(agg_clean)} non-null observation(s) after aggregation in the selected range. "
             "At least 2 are required to form a time series."
         )
 

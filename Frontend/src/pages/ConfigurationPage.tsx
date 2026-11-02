@@ -1,11 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Calendar,
   Play,
-  Cpu,
-  CheckSquare,
-  Square,
   AlertCircle,
   Loader2,
   Building2,
@@ -17,14 +14,16 @@ import {
   Target,
   Circle,
   CircleDot,
+  Info,
+  TrendingUp,
 } from 'lucide-react'
-import { getAvailableModels, getDimensions, startTraining } from '../api/client'
+import { getDimensions, getSeriesInfo, startTraining } from '../api/client'
 import { useSession } from '../contexts/SessionContext'
-import type { AccountItem, CandidateModelInfo, DimensionValue } from '../types'
+import type { AccountItem, DimensionValue } from '../types'
 
 export const ConfigurationPage: React.FC = () => {
   const navigate = useNavigate()
-  const { datasetId, transformData, setJobId } = useSession()
+  const { datasetId, transformData, setJobId, setForecastConfig } = useSession()
 
   const [dimensions, setDimensions] = useState<DimensionValue[]>([])
   const [buHierarchy, setBuHierarchy] = useState<Record<string, string[]>>({})
@@ -40,14 +39,24 @@ export const ConfigurationPage: React.FC = () => {
   // UI state
   const [buSearch, setBuSearch] = useState('')
   const [accountSearch, setAccountSearch] = useState('')
-  const [accountFilterType, setAccountFilterType] = useState<'all' | 'pl' | 'gl'>('all')
   const [expandedBUs, setExpandedBUs] = useState<Record<string, boolean>>({})
 
-  // Models & Validation
-  const [availableModels, setAvailableModels] = useState<CandidateModelInfo[]>([])
-  const [selectedModels, setSelectedModels] = useState<string[]>([])
+  // Series info (loaded reactively when selection changes)
+  const [seriesInfo, setSeriesInfo] = useState<{
+    n_observations: number
+    date_range_start: string
+    date_range_end: string
+    recommended_horizon: number
+    warnings: string[]
+  } | null>(null)
+  const [seriesInfoLoading, setSeriesInfoLoading] = useState(false)
+
+  // Training date range
+  const [trainStart, setTrainStart] = useState<string>('')
+  const [trainEnd, setTrainEnd] = useState<string>('')
+
+  // Forecast horizon (dropdown 1-100, pre-selected from recommendation)
   const [forecastHorizon, setForecastHorizon] = useState<number>(12)
-  const [validationSplit, setValidationSplit] = useState<number>(0.75)
 
   const [isLoading, setIsLoading] = useState<boolean>(true)
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false)
@@ -62,38 +71,36 @@ export const ConfigurationPage: React.FC = () => {
     const loadConfig = async () => {
       setIsLoading(true)
       try {
-        const [dimRes, modelsRes] = await Promise.all([
-          getDimensions(datasetId),
-          getAvailableModels(),
-        ])
+        const dimRes = await getDimensions(datasetId)
         setDimensions(dimRes.dimensions)
         setBuHierarchy(dimRes.bu_entity_hierarchy || {})
         const accs = dimRes.accounts || []
         setAccountsList(accs)
         setRelationsList(dimRes.relations || [])
 
-        // Default to PL01 (Sales Revenue) if present, or first account
+        // Default to Sales Revenue (PL01) if present
         const defaultTarget =
-          accs.find((a) => a.account.toUpperCase() === 'PL01')?.account ||
-          (accs[0]?.account ?? null)
+          accs.find(
+            (a) =>
+              a.account.toUpperCase() === 'PL01' ||
+              a.description.toLowerCase().includes('sales revenue')
+          )?.account || (accs[0]?.account ?? null)
         setSelectedTargetAccount(defaultTarget)
 
-        // Initialize other dimensions
         const initialOther: Record<string, string[]> = {}
         dimRes.dimensions.forEach((d) => {
           const lName = d.name.toLowerCase()
-          if (!lName.includes('business unit') && !lName.includes('legal_entity') && !lName.includes('legal entity') && lName !== 'account' && lName !== 'description') {
+          if (
+            !lName.includes('business unit') &&
+            !lName.includes('legal_entity') &&
+            !lName.includes('legal entity') &&
+            lName !== 'account' &&
+            lName !== 'description'
+          ) {
             initialOther[d.name] = []
           }
         })
         setOtherFilters(initialOther)
-
-        // Filter out Theta/AutoTheta
-        const activeModels = modelsRes.models.filter(
-          (m) => m.name !== 'Theta' && m.name !== 'AutoTheta'
-        )
-        setAvailableModels(activeModels)
-        setSelectedModels(activeModels.filter((m) => m.is_available).map((m) => m.name))
       } catch (err: any) {
         setErrorMsg(err.message || 'Failed to load configuration parameters.')
       } finally {
@@ -104,16 +111,13 @@ export const ConfigurationPage: React.FC = () => {
     loadConfig()
   }, [datasetId, transformData, navigate])
 
-  // All Business Units from hierarchy or fallback
+  // All Business Units from hierarchy
   const allBUs = useMemo(() => {
-    if (Object.keys(buHierarchy).length > 0) {
-      return Object.keys(buHierarchy).sort()
-    }
+    if (Object.keys(buHierarchy).length > 0) return Object.keys(buHierarchy).sort()
     const buDim = dimensions.find((d) => d.name.toLowerCase().includes('business unit'))
     return buDim ? buDim.values : []
   }, [buHierarchy, dimensions])
 
-  // Filtered BUs by search term
   const visibleBUs = useMemo(() => {
     if (!buSearch) return allBUs
     return allBUs.filter((bu) => bu.toLowerCase().includes(buSearch.toLowerCase()))
@@ -129,35 +133,24 @@ export const ConfigurationPage: React.FC = () => {
         setBuEntities(nextEntities)
         return next
       } else {
-        // Expand and initialize with all entities for this BU
         setExpandedBUs((exp) => ({ ...exp, [bu]: true }))
         return [...prev, bu]
       }
     })
   }
 
-  const selectAllBUs = () => {
-    setSelectedBUs([...allBUs])
-  }
-
+  const selectAllBUs = () => setSelectedBUs([...allBUs])
   const clearAllBUs = () => {
     setSelectedBUs([])
     setBuEntities({})
   }
 
-  // Toggle an SAC Legal Entity for a specific Business Unit
   const toggleEntityForBU = (bu: string, entity: string) => {
     setBuEntities((prev) => {
       const current = prev[bu] || []
-      let updated: string[]
-
-      if (current.includes(entity)) {
-        updated = current.filter((e) => e !== entity)
-      } else {
-        updated = [...current, entity]
-      }
-
-      // If user selected all entities of this BU, keep as full list
+      const updated = current.includes(entity)
+        ? current.filter((e) => e !== entity)
+        : [...current, entity]
       return { ...prev, [bu]: updated }
     })
   }
@@ -171,23 +164,16 @@ export const ConfigurationPage: React.FC = () => {
     setBuEntities((prev) => ({ ...prev, [bu]: [] }))
   }
 
-  // Filter accounts dynamically based on selected BU and Legal Entities
+  // Accounts available for selection based on selected BU and Legal Entities
   const availableAccounts = useMemo(() => {
     if (accountsList.length === 0) return []
-
-    // If no BU selected, or no relations, show all accounts
-    if (selectedBUs.length === 0 || relationsList.length === 0) {
-      return accountsList
-    }
-
-    // Find accounts matching selected (BU, Entity) pairs
+    if (selectedBUs.length === 0 || relationsList.length === 0) return accountsList
     const validAccSet = new Set<string>()
     relationsList.forEach((rel) => {
       const bu = rel.bu
       const ent = rel.entity
       const acc = rel.account
       if (!acc) return
-
       if (selectedBUs.includes(bu)) {
         const selectedEntsForThisBU = buEntities[bu] || []
         if (selectedEntsForThisBU.length === 0 || selectedEntsForThisBU.includes(ent)) {
@@ -195,20 +181,29 @@ export const ConfigurationPage: React.FC = () => {
         }
       }
     })
-
     return accountsList.filter((a) => validAccSet.has(a.account))
   }, [accountsList, relationsList, selectedBUs, buEntities])
 
-  // Filter accounts by search and category
-  const visibleAccounts = useMemo(() => {
-    let list = availableAccounts
-
-    if (accountFilterType === 'pl') {
-      list = list.filter((a) => a.account.toUpperCase().startsWith('PL'))
-    } else if (accountFilterType === 'gl') {
-      list = list.filter((a) => !a.account.toUpperCase().startsWith('PL'))
+  // Synchronize target selection if available accounts change
+  useEffect(() => {
+    if (availableAccounts.length > 0) {
+      const currentValid = availableAccounts.some((a) => a.account === selectedTargetAccount)
+      if (!currentValid) {
+        const sales = availableAccounts.find(
+          (a) =>
+            a.account.toUpperCase() === 'PL01' ||
+            a.description.toLowerCase().includes('sales revenue')
+        )
+        setSelectedTargetAccount(sales ? sales.account : availableAccounts[0].account)
+      }
+    } else {
+      setSelectedTargetAccount(null)
     }
+  }, [availableAccounts, selectedTargetAccount])
 
+  // Visible accounts: filter by search, and pin Sales Revenue / currently selected to the top!
+  const visibleAccounts = useMemo(() => {
+    let list = [...availableAccounts]
     if (accountSearch.trim()) {
       const q = accountSearch.toLowerCase()
       list = list.filter(
@@ -219,28 +214,99 @@ export const ConfigurationPage: React.FC = () => {
       )
     }
 
+    // Sorting:
+    // 1. Selected target always at the very top!
+    // 2. Sales Revenue (PL01) next
+    // 3. Other accounts alphabetically
+    list.sort((a, b) => {
+      const aIsSelected = a.account === selectedTargetAccount
+      const bIsSelected = b.account === selectedTargetAccount
+      if (aIsSelected && !bIsSelected) return -1
+      if (!aIsSelected && bIsSelected) return 1
+
+      const aIsSales =
+        a.account.toUpperCase() === 'PL01' ||
+        a.description.toLowerCase().includes('sales revenue')
+      const bIsSales =
+        b.account.toUpperCase() === 'PL01' ||
+        b.description.toLowerCase().includes('sales revenue')
+      if (aIsSales && !bIsSales) return -1
+      if (!aIsSales && bIsSales) return 1
+
+      return a.label.localeCompare(b.label)
+    })
+
     return list
-  }, [availableAccounts, accountFilterType, accountSearch])
+  }, [availableAccounts, accountSearch, selectedTargetAccount])
 
-  // Select single forecasting target account
-  const selectTargetAccount = (accCode: string) => {
-    setSelectedTargetAccount((prev) => (prev === accCode ? null : accCode))
-  }
+  // --- Fetch series info from backend with strict starting month checking ---
+  const fetchSeriesInfo = useCallback(async () => {
+    if (!datasetId || !selectedTargetAccount) {
+      setSeriesInfo(null)
+      return
+    }
+    setSeriesInfoLoading(true)
+    try {
+      const payloadBUEntities: Record<string, string[]> = {}
+      selectedBUs.forEach((bu) => {
+        payloadBUEntities[bu] = buEntities[bu] || []
+      })
 
-  // Toggle candidate models
-  const toggleModel = (modelName: string) => {
-    setSelectedModels((prev) =>
-      prev.includes(modelName) ? prev.filter((m) => m !== modelName) : [...prev, modelName]
-    )
-  }
+      const info = await getSeriesInfo(datasetId, {
+        bu_entities: selectedBUs.length > 0 ? payloadBUEntities : undefined,
+        accounts: [selectedTargetAccount],
+        filters: otherFilters,
+      })
+      setSeriesInfo(info)
+      // Set training range defaults to the actual observed bounds
+      setTrainStart(info.date_range_start)
+      setTrainEnd(info.date_range_end)
+    } catch {
+      setSeriesInfo(null)
+    } finally {
+      setSeriesInfoLoading(false)
+    }
+  }, [datasetId, selectedBUs, buEntities, selectedTargetAccount, otherFilters])
 
-  const selectAllModels = () => {
-    setSelectedModels(availableModels.filter((m) => m.is_available).map((m) => m.name))
-  }
+  useEffect(() => {
+    fetchSeriesInfo()
+  }, [fetchSeriesInfo])
 
-  const deselectAllModels = () => {
-    setSelectedModels([])
-  }
+  // Compute filtered observation count based on trainStart / trainEnd selection
+  const filteredObsCount = useMemo(() => {
+    if (!seriesInfo || !trainStart || !trainEnd) return seriesInfo?.n_observations || 0
+    if (!seriesInfo.date_range_start || !seriesInfo.date_range_end) return 0
+    const startMs = new Date(trainStart).getTime()
+    const endMs = new Date(trainEnd).getTime()
+    const seriesStartMs = new Date(seriesInfo.date_range_start).getTime()
+    const seriesEndMs = new Date(seriesInfo.date_range_end).getTime()
+    if (startMs > endMs) return 0
+    // Count months in [trainStart, trainEnd] that overlap with [seriesStart, seriesEnd]
+    const effStart = Math.max(startMs, seriesStartMs)
+    const effEnd = Math.min(endMs, seriesEndMs)
+    if (effStart > effEnd) return 0
+    const s = new Date(effStart)
+    const e = new Date(effEnd)
+    return (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth()) + 1
+  }, [seriesInfo, trainStart, trainEnd])
+
+  // Dynamically calculate recommended horizon based on current filteredObsCount
+  // Rule: if 36 months -> 6; otherwise 4:1 ratio (floor(n / 4)), min 1, max 36
+  const recommendedHorizon = useMemo(() => {
+    if (filteredObsCount <= 0) return 0
+    if (filteredObsCount === 36) return 6
+    return Math.max(1, Math.min(36, Math.floor(filteredObsCount / 4)))
+  }, [filteredObsCount])
+
+  // Automatically update forecastHorizon to the recommended horizon whenever it changes
+  useEffect(() => {
+    if (recommendedHorizon > 0) {
+      setForecastHorizon(recommendedHorizon)
+    }
+  }, [recommendedHorizon])
+
+  const hasEnoughData = filteredObsCount >= 12
+  const horizonOptions = Array.from({ length: 100 }, (_, i) => i + 1)
 
   const handleStartTraining = async () => {
     if (!datasetId) return
@@ -248,18 +314,32 @@ export const ConfigurationPage: React.FC = () => {
       setErrorMsg('Please select a Forecasting Target account to proceed.')
       return
     }
-    if (selectedModels.length === 0) {
-      setErrorMsg('Please select at least one candidate forecasting model.')
+    if (!hasEnoughData) {
+      setErrorMsg(
+        `At least 12 months of training data are required. Current selection: ${filteredObsCount} month(s).`
+      )
       return
     }
 
     setIsSubmitting(true)
     setErrorMsg(null)
     try {
-      // Build clean bu_entities payload
       const payloadBUEntities: Record<string, string[]> = {}
       selectedBUs.forEach((bu) => {
         payloadBUEntities[bu] = buEntities[bu] || []
+      })
+
+      setForecastConfig({
+        businessUnits: selectedBUs,
+        buEntities: payloadBUEntities,
+        targetAccount: selectedTargetAccount,
+        targetLabel:
+          accountsList.find((a) => a.account === selectedTargetAccount)?.label ||
+          selectedTargetAccount,
+        trainStart: trainStart || seriesInfo?.date_range_start || '',
+        trainEnd: trainEnd || seriesInfo?.date_range_end || '',
+        forecastHorizon: forecastHorizon,
+        totalObservations: filteredObsCount,
       })
 
       const res = await startTraining({
@@ -268,8 +348,9 @@ export const ConfigurationPage: React.FC = () => {
         accounts: [selectedTargetAccount],
         filters: otherFilters,
         forecast_horizon: forecastHorizon,
-        validation_split: validationSplit,
-        candidate_models: selectedModels,
+        validation_split: 0.75,
+        train_start: trainStart || undefined,
+        train_end: trainEnd || undefined,
       })
       setJobId(res.job_id)
       navigate('/training')
@@ -283,7 +364,7 @@ export const ConfigurationPage: React.FC = () => {
     return (
       <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-3">
         <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
-        <p className="text-sm text-slate-500">Loading hierarchy and candidate models...</p>
+        <p className="text-sm text-slate-500">Loading dimension hierarchy...</p>
       </div>
     )
   }
@@ -295,14 +376,14 @@ export const ConfigurationPage: React.FC = () => {
         <div>
           <h2 className="text-xl font-bold text-slate-800">Forecast Configuration</h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Hierarchical Business Unit & SAC Legal Entity filtering with 1-to-1 Account & Description mapping.
+            Select business units, legal entities, and a forecasting target to build your series.
           </p>
         </div>
 
         <button
           onClick={handleStartTraining}
-          disabled={isSubmitting || selectedModels.length === 0}
-          className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition flex items-center gap-2 shadow-xs disabled:opacity-50"
+          disabled={isSubmitting || !selectedTargetAccount || !hasEnoughData}
+          className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition flex items-center gap-2 shadow-xs disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {isSubmitting ? (
             <>
@@ -327,7 +408,7 @@ export const ConfigurationPage: React.FC = () => {
 
       {/* Main Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left Column (2 cols): Hierarchical Filters */}
+        {/* Left Column (2 cols): Hierarchical Filters + Target */}
         <div className="lg:col-span-2 space-y-6">
           {/* SECTION 1: Business Unit & Hierarchical SAC Legal Entity */}
           <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-2xs space-y-5">
@@ -357,14 +438,16 @@ export const ConfigurationPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Business Unit Selection Chips */}
+            {/* Business Unit Chips */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-slate-700">
                   Select Business Unit(s):
                 </label>
                 <span className="text-[11px] text-slate-400">
-                  {selectedBUs.length > 0 ? `${selectedBUs.length} selected` : 'All Included by default'}
+                  {selectedBUs.length > 0
+                    ? `${selectedBUs.length} selected`
+                    : 'All included by default'}
                 </span>
               </div>
 
@@ -401,7 +484,7 @@ export const ConfigurationPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Hierarchical SAC Legal Entity Section */}
+            {/* Hierarchical SAC Legal Entity */}
             <div className="pt-3 border-t border-slate-100 space-y-3">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
@@ -429,7 +512,6 @@ export const ConfigurationPage: React.FC = () => {
                         key={bu}
                         className="border border-slate-200 rounded-lg overflow-hidden bg-white shadow-2xs"
                       >
-                        {/* BU Header Bar */}
                         <div
                           className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between cursor-pointer select-none"
                           onClick={() =>
@@ -447,7 +529,6 @@ export const ConfigurationPage: React.FC = () => {
                                 : `All ${availableEntities.length} entities`}
                             </span>
                           </div>
-
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
@@ -483,7 +564,6 @@ export const ConfigurationPage: React.FC = () => {
                           </div>
                         </div>
 
-                        {/* Legal Entities for this BU */}
                         {isExpanded && (
                           <div className="p-3 bg-white">
                             {availableEntities.length === 0 ? (
@@ -493,7 +573,6 @@ export const ConfigurationPage: React.FC = () => {
                             ) : (
                               <div className="flex flex-wrap gap-1.5">
                                 {availableEntities.map((ent) => {
-                                  // If none explicitly selected, all are active by default
                                   const isSelected =
                                     selectedForThisBU.length === 0 ||
                                     selectedForThisBU.includes(ent)
@@ -526,7 +605,7 @@ export const ConfigurationPage: React.FC = () => {
             </div>
           </div>
 
-          {/* SECTION 2: Forecasting Target (Single Selection) */}
+          {/* SECTION 2: Forecasting Target (Single Selection, Sales Revenue pinned to top, No filter tabs) */}
           <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-2xs space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
@@ -538,7 +617,6 @@ export const ConfigurationPage: React.FC = () => {
                   Single Select
                 </span>
               </div>
-
               <div className="flex items-center gap-2 text-xs">
                 {selectedTargetAccount ? (
                   <button
@@ -556,57 +634,19 @@ export const ConfigurationPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Filter controls */}
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="relative flex-1 min-w-[220px]">
-                <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Search account code or description (e.g. Sales, PL01, Domestic)..."
-                  value={accountSearch}
-                  onChange={(e) => setAccountSearch(e.target.value)}
-                  className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                />
-              </div>
-
-              <div className="flex items-center bg-slate-100 p-0.5 rounded-lg text-xs font-medium">
-                <button
-                  type="button"
-                  onClick={() => setAccountFilterType('all')}
-                  className={`px-2.5 py-1 rounded-md transition ${
-                    accountFilterType === 'all'
-                      ? 'bg-white text-slate-800 shadow-xs font-semibold'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  All ({availableAccounts.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAccountFilterType('pl')}
-                  className={`px-2.5 py-1 rounded-md transition ${
-                    accountFilterType === 'pl'
-                      ? 'bg-white text-emerald-700 shadow-xs font-semibold'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  P&L Only ({availableAccounts.filter((a) => a.account.toUpperCase().startsWith('PL')).length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAccountFilterType('gl')}
-                  className={`px-2.5 py-1 rounded-md transition ${
-                    accountFilterType === 'gl'
-                      ? 'bg-white text-slate-800 shadow-xs font-semibold'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  G/L Accounts
-                </button>
-              </div>
+            {/* Clean full-width search bar without filter buttons */}
+            <div className="relative w-full">
+              <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Search account code or description (e.g. Sales Revenue, PL01, Domestic)..."
+                value={accountSearch}
+                onChange={(e) => setAccountSearch(e.target.value)}
+                className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-emerald-500"
+              />
             </div>
 
-            {/* Account Selection Grid (Single Radio Selection) */}
+            {/* Account List: Sales Revenue / selected target pinned at the top */}
             <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
               {visibleAccounts.length === 0 ? (
                 <div className="p-4 text-center text-xs text-slate-400 italic">
@@ -616,11 +656,14 @@ export const ConfigurationPage: React.FC = () => {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5">
                   {visibleAccounts.map((acc) => {
                     const isSelected = selectedTargetAccount === acc.account
-                    const isPL = acc.account.toUpperCase().startsWith('PL')
                     return (
                       <div
                         key={acc.account}
-                        onClick={() => selectTargetAccount(acc.account)}
+                        onClick={() =>
+                          setSelectedTargetAccount((prev) =>
+                            prev === acc.account ? null : acc.account
+                          )
+                        }
                         className={`p-2.5 rounded-lg text-xs cursor-pointer transition flex items-center justify-between border ${
                           isSelected
                             ? 'bg-emerald-50 border-emerald-500 ring-1 ring-emerald-500 text-slate-900 font-semibold shadow-xs'
@@ -642,8 +685,7 @@ export const ConfigurationPage: React.FC = () => {
                             </span>
                           </div>
                         </div>
-
-                        {isPL && (
+                        {/* {isPL && (
                           <span
                             className={`px-1.5 py-0.5 rounded text-[10px] font-bold shrink-0 ml-1 ${
                               isSelected
@@ -653,7 +695,7 @@ export const ConfigurationPage: React.FC = () => {
                           >
                             P&L
                           </span>
-                        )}
+                        )} */}
                       </div>
                     )
                   })}
@@ -661,7 +703,6 @@ export const ConfigurationPage: React.FC = () => {
               )}
             </div>
 
-            {/* Footer with active target and double-counting warning */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-[11px] text-slate-500 pt-1.5 border-t border-slate-100">
               <span className="flex items-center gap-1.5 font-medium text-slate-700">
                 <Target className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
@@ -669,7 +710,8 @@ export const ConfigurationPage: React.FC = () => {
                   <span>
                     Selected Target:{' '}
                     <span className="font-bold text-emerald-700">
-                      {accountsList.find((a) => a.account === selectedTargetAccount)?.label || selectedTargetAccount}
+                      {accountsList.find((a) => a.account === selectedTargetAccount)?.label ||
+                        selectedTargetAccount}
                     </span>
                   </span>
                 ) : (
@@ -685,115 +727,173 @@ export const ConfigurationPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Right Column: Parameters & Models */}
+        {/* Right Column: Series Info + Training Range + Dynamic Horizon */}
         <div className="space-y-6">
-          {/* Horizon & Validation Settings */}
-          <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-2xs space-y-4">
+          {/* Series Info Panel */}
+          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-2xs space-y-4">
             <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-slate-100">
-              <Calendar className="w-4 h-4 text-blue-600" />
-              Horizon & Validation
+              <TrendingUp className="w-4 h-4 text-blue-600" />
+              Series Information
             </span>
 
-            <div>
-              <label className="text-xs font-semibold text-slate-700 block mb-1">
-                Forecast Horizon (Future Months)
-              </label>
-              <div className="grid grid-cols-4 gap-2">
-                {[3, 6, 12, 24].map((h) => (
-                  <button
-                    key={h}
-                    type="button"
-                    onClick={() => setForecastHorizon(h)}
-                    className={`py-1.5 rounded-lg text-xs font-medium border transition ${
-                      forecastHorizon === h
-                        ? 'bg-blue-600 text-white border-blue-600 shadow-2xs'
-                        : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    {h} mo
-                  </button>
-                ))}
+            {seriesInfoLoading ? (
+              <div className="flex items-center gap-2 py-4 justify-center text-slate-500 text-xs">
+                <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
+                <span>Checking available history...</span>
               </div>
-            </div>
+            ) : seriesInfo && seriesInfo.n_observations > 0 ? (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-slate-50 rounded-lg p-3 border border-slate-100">
+                    <span className="text-[10px] text-slate-400 block mb-0.5 uppercase tracking-wide">
+                      Available Start
+                    </span>
+                    <span className="text-xs font-bold text-slate-800">
+                      {new Date(seriesInfo.date_range_start).toLocaleDateString('en-US', {
+                        month: 'short',
+                        year: 'numeric',
+                      })}
+                    </span>
+                  </div>
+                  <div className="bg-slate-50 rounded-lg p-3 border border-slate-100">
+                    <span className="text-[10px] text-slate-400 block mb-0.5 uppercase tracking-wide">
+                      Available End
+                    </span>
+                    <span className="text-xs font-bold text-slate-800">
+                      {new Date(seriesInfo.date_range_end).toLocaleDateString('en-US', {
+                        month: 'short',
+                        year: 'numeric',
+                      })}
+                    </span>
+                  </div>
+                </div>
+                <div className="bg-blue-50 rounded-lg p-3 border border-blue-100 flex items-center justify-between">
+                  <span className="text-xs text-blue-700 font-semibold">
+                    Available Observations
+                  </span>
+                  <span className="text-lg font-bold text-blue-700">
+                    {seriesInfo.n_observations}
+                  </span>
+                </div>
+                {seriesInfo.warnings.length > 0 && (
+                  <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 flex gap-1.5">
+                    <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span>{seriesInfo.warnings[0]}</span>
+                  </div>
+                )}
+              </div>
+            ) : !selectedTargetAccount ? (
+              <div className="text-xs text-slate-400 italic text-center py-4">
+                Select a forecasting target to see series information.
+              </div>
+            ) : (
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 space-y-1 text-center">
+                <p className="font-semibold">No Historical Data Found</p>
+                <p className="text-[11px] text-amber-700">
+                  All observations for this target are empty or zero in the selected entity.
+                </p>
+              </div>
+            )}
+          </div>
 
-            <div>
-              <div className="flex justify-between text-xs font-semibold text-slate-700 mb-1">
-                <span>Validation Split</span>
-                <span className="text-blue-600">
-                  {Math.round(validationSplit * 100)}% Train / {Math.round((1 - validationSplit) * 100)}% Val
-                </span>
+          {/* Training Date Range */}
+          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-2xs space-y-4">
+            <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-slate-100">
+              <Calendar className="w-4 h-4 text-blue-600" />
+              Training Date Range
+            </span>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-[11px] text-slate-500 font-semibold uppercase tracking-wide block mb-1">
+                  Training Start Month
+                </label>
+                <input
+                  type="month"
+                  value={trainStart ? trainStart.slice(0, 7) : ''}
+                  min={seriesInfo?.date_range_start?.slice(0, 7) || ''}
+                  max={
+                    trainEnd
+                      ? trainEnd.slice(0, 7)
+                      : seriesInfo?.date_range_end?.slice(0, 7) || ''
+                  }
+                  onChange={(e) => setTrainStart(e.target.value ? `${e.target.value}-01` : '')}
+                  disabled={!seriesInfo || seriesInfo.n_observations === 0}
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-40"
+                />
               </div>
-              <input
-                type="range"
-                min="0.5"
-                max="0.85"
-                step="0.05"
-                value={validationSplit}
-                onChange={(e) => setValidationSplit(parseFloat(e.target.value))}
-                className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
-              />
-              <span className="text-[10px] text-slate-400 block mt-1">
-                Chronological evaluation without data leakage.
-              </span>
+              <div>
+                <label className="text-[11px] text-slate-500 font-semibold uppercase tracking-wide block mb-1">
+                  Training End Month
+                </label>
+                <input
+                  type="month"
+                  value={trainEnd ? trainEnd.slice(0, 7) : ''}
+                  min={
+                    trainStart
+                      ? trainStart.slice(0, 7)
+                      : seriesInfo?.date_range_start?.slice(0, 7) || ''
+                  }
+                  max={seriesInfo?.date_range_end?.slice(0, 7) || ''}
+                  onChange={(e) => setTrainEnd(e.target.value ? `${e.target.value}-01` : '')}
+                  disabled={!seriesInfo || seriesInfo.n_observations === 0}
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-40"
+                />
+              </div>
+
+              {/* Filtered observation count + validation badge */}
+              <div
+                className={`p-3 rounded-lg border text-xs ${
+                  hasEnoughData
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                    : 'bg-amber-50 border-amber-200 text-amber-700'
+                }`}
+              >
+                <div className="flex items-center justify-between font-semibold">
+                  <span>Selected Training Period</span>
+                  <span>{filteredObsCount} month(s)</span>
+                </div>
+                <p className="text-[10px] mt-0.5 opacity-80">
+                  {hasEnoughData
+                    ? `✓ Sufficient data.`
+                    : `⚠ Minimum 12 months required for training. Current selection: ${filteredObsCount} month(s).`}
+                </p>
+              </div>
             </div>
           </div>
 
-          {/* Candidate Models */}
-          <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-2xs space-y-4">
-            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-              <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
-                <Cpu className="w-4 h-4 text-blue-600" />
-                Candidate Models ({selectedModels.length})
-              </span>
-              <div className="flex gap-2 text-[11px]">
-                <button
-                  type="button"
-                  onClick={selectAllModels}
-                  className="text-blue-600 hover:underline"
-                >
-                  All
-                </button>
-                <span className="text-slate-300">|</span>
-                <button
-                  type="button"
-                  onClick={deselectAllModels}
-                  className="text-slate-500 hover:underline"
-                >
-                  None
-                </button>
-              </div>
-            </div>
+          {/* Dynamic Forecast Horizon Dropdown */}
+          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-2xs space-y-4">
+            <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-slate-100">
+              <Calendar className="w-4 h-4 text-blue-600" />
+              Forecast Horizon
+            </span>
 
-            <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
-              {availableModels.map((m) => {
-                const isSelected = selectedModels.includes(m.name)
-                return (
-                  <div
-                    key={m.name}
-                    onClick={() => m.is_available && toggleModel(m.name)}
-                    className={`flex items-center justify-between p-2 rounded-lg text-xs cursor-pointer transition border ${
-                      !m.is_available
-                        ? 'opacity-40 bg-slate-50 border-slate-100 cursor-not-allowed'
-                        : isSelected
-                        ? 'bg-blue-50/60 border-blue-200 text-slate-900 font-medium'
-                        : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      {isSelected ? (
-                        <CheckSquare className="w-4 h-4 text-blue-600" />
-                      ) : (
-                        <Square className="w-4 h-4 text-slate-300" />
-                      )}
-                      <span>{m.name}</span>
-                    </div>
+            <div>
+              <label className="text-[11px] text-slate-500 font-semibold uppercase tracking-wide block mb-1">
+                Future Months to Forecast
+              </label>
+              <select
+                value={forecastHorizon}
+                onChange={(e) => setForecastHorizon(Number(e.target.value))}
+                className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 font-medium text-slate-800"
+              >
+                {horizonOptions.map((h) => (
+                  <option key={h} value={h}>
+                    {h} month{h > 1 ? 's' : ''}
+                    {recommendedHorizon === h ? ' (Recommended)' : ''}
+                  </option>
+                ))}
+              </select>
 
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
-                      {m.family}
-                    </span>
-                  </div>
-                )
-              })}
+              {recommendedHorizon > 0 && (
+                <div className="mt-2 p-2.5 bg-blue-50 border border-blue-100 rounded-lg text-[11px] text-blue-700">
+                  <span className="font-semibold">Recommended:</span> {recommendedHorizon} months
+                  <span className="text-blue-500 ml-1">
+                    (based on {filteredObsCount} months training range)
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -1,12 +1,16 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   TrendingUp,
   RotateCw,
   BarChart2,
-  Award,
   Loader2,
   Shield,
+  Building2,
+  Briefcase,
+  Target,
+  Calendar,
+  Clock,
 } from 'lucide-react'
 import {
   Bar,
@@ -26,7 +30,7 @@ import type { ExplanationReport } from '../types'
 
 export const ExplanationReportPage: React.FC = () => {
   const navigate = useNavigate()
-  const { jobId } = useSession()
+  const { jobId, forecastConfig } = useSession()
 
   const [report, setReport] = useState<ExplanationReport | null>(null)
   const [isLoading, setIsLoading] = useState<boolean>(true)
@@ -53,11 +57,28 @@ export const ExplanationReportPage: React.FC = () => {
     loadReport()
   }, [jobId, navigate])
 
+  const activeConfig = useMemo(() => {
+    if (forecastConfig) return forecastConfig
+    if (report?.configuration) {
+      return {
+        businessUnits: report.configuration.business_units || [],
+        buEntities: report.configuration.bu_entities || {},
+        targetAccount: report.configuration.accounts?.[0] || null,
+        targetLabel: report.configuration.accounts?.[0] || 'Target Account',
+        trainStart: report.configuration.train_start || '',
+        trainEnd: report.configuration.train_end || '',
+        forecastHorizon: report.configuration.forecast_horizon || 12,
+        totalObservations: report.configuration.total_observations,
+      }
+    }
+    return null
+  }, [forecastConfig, report])
+
   if (isLoading) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-3">
         <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
-        <p className="text-sm text-slate-500">Computing statistical diagnostics and explanations...</p>
+        <p className="text-sm text-slate-500">Computing statistical diagnostics and pattern explanations...</p>
       </div>
     )
   }
@@ -85,42 +106,108 @@ export const ExplanationReportPage: React.FC = () => {
     trend: pt.value,
   }))
 
+  const trendYearStarts = trendData
+    .filter((pt) => pt.date.endsWith('-01'))
+    .map((pt) => pt.date)
+
   // Seasonality chart format
   const seasonalData = (report.seasonality?.values || []).map((pt) => ({
     date: pt.date.slice(0, 7),
     seasonal: pt.value,
   }))
 
+  const seasonalYearStarts = seasonalData
+    .filter((pt) => pt.date.endsWith('-01'))
+    .map((pt) => pt.date)
+
+  const entitiesSummary = () => {
+    if (!activeConfig?.buEntities || Object.keys(activeConfig.buEntities).length === 0) {
+      return 'All Legal Entities'
+    }
+    const allEnts: string[] = []
+    Object.entries(activeConfig.buEntities).forEach(([bu, ents]) => {
+      if (ents && ents.length > 0) {
+        ents.forEach((e) => allEnts.push(`${bu}:${e}`))
+      }
+    })
+    return allEnts.length > 0 ? allEnts.join(', ') : 'All Legal Entities'
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
       <div>
         <span className="text-xs font-semibold text-blue-600 uppercase tracking-wider">
-          SAP Smart Predict Inspired
+          Statistical Diagnostics
         </span>
-        <h2 className="text-xl font-bold text-slate-800">Explanation & Diagnostic Report</h2>
+        <h2 className="text-xl font-bold text-slate-800">Series Pattern & Explanation Report</h2>
         <p className="text-xs text-slate-500 mt-0.5">
-          Mathematical decomposition of historical patterns, trend trajectory, seasonality detection, and autocorrelation analysis.
+          Mathematical decomposition of underlying trajectory, recurring seasonal cycles, and autocorrelation across lags.
         </p>
       </div>
 
-      {/* Model Selection Card */}
-      <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-2xs space-y-3">
-        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-          <div className="flex items-center gap-2">
-            <Award className="w-5 h-5 text-amber-500" />
-            <h3 className="text-sm font-bold text-slate-800">
-              Selected Champion Model: {report.best_model}
-            </h3>
-          </div>
-          <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
-            Family: {report.model_family}
+      {/* Selected Configuration Card */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-2xs space-y-3">
+        <div className="flex items-center gap-2 pb-2 border-b border-slate-100">
+          <Target className="w-4 h-4 text-emerald-600" />
+          <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+            Analyzed Series Configuration
           </span>
         </div>
 
-        <p className="text-xs text-slate-600 leading-relaxed">
-          {report.why_selected}
-        </p>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 pt-1">
+          <div className="space-y-1">
+            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+              <Building2 className="w-3 h-3 text-blue-500" />
+              Business Unit(s)
+            </span>
+            <p className="text-xs font-bold text-slate-800 truncate" title={activeConfig?.businessUnits?.join(', ') || 'All'}>
+              {activeConfig?.businessUnits && activeConfig.businessUnits.length > 0
+                ? activeConfig.businessUnits.join(', ')
+                : 'All Business Units'}
+            </p>
+          </div>
+
+          <div className="space-y-1">
+            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+              <Briefcase className="w-3 h-3 text-blue-500" />
+              Legal Entities
+            </span>
+            <p className="text-xs font-bold text-slate-800 truncate" title={entitiesSummary()}>
+              {entitiesSummary()}
+            </p>
+          </div>
+
+          <div className="space-y-1">
+            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+              <Target className="w-3 h-3 text-emerald-500" />
+              Target Account
+            </span>
+            <p className="text-xs font-bold text-emerald-700 truncate" title={activeConfig?.targetLabel || activeConfig?.targetAccount || 'Target'}>
+              {activeConfig?.targetLabel || activeConfig?.targetAccount || 'Sales Revenue (PL01)'}
+            </p>
+          </div>
+
+          <div className="space-y-1">
+            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+              <Calendar className="w-3 h-3 text-slate-400" />
+              Analyzed Period
+            </span>
+            <p className="text-xs font-bold text-slate-800">
+              {activeConfig?.trainStart?.slice(0, 7) || 'Start'} → {activeConfig?.trainEnd?.slice(0, 7) || 'End'}
+            </p>
+          </div>
+
+          <div className="space-y-1">
+            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+              <Clock className="w-3 h-3 text-orange-500" />
+              Forecast Horizon
+            </span>
+            <p className="text-xs font-bold text-orange-600">
+              {activeConfig?.forecastHorizon || 12} Months
+            </p>
+          </div>
+        </div>
       </div>
 
       {/* Diagnostics Grid: Trend and Seasonality */}
@@ -155,9 +242,9 @@ export const ExplanationReportPage: React.FC = () => {
           </p>
 
           {trendData.length > 0 && (
-            <div className="h-48 w-full pt-1">
+            <div className="h-52 w-full pt-1">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={trendData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                <LineChart data={trendData} margin={{ top: 10, right: 20, left: 0, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                   <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748b' }} />
                   <YAxis
@@ -167,6 +254,24 @@ export const ExplanationReportPage: React.FC = () => {
                   <Tooltip
                     formatter={(value: any) => [Number(value).toLocaleString(), 'Estimated Trend']}
                   />
+
+                  {/* Subtle grey vertical divider lines on January (Year Start) */}
+                  {trendYearStarts.map((yr) => (
+                    <ReferenceLine
+                      key={yr}
+                      x={yr}
+                      stroke="#e2e8f0"
+                      strokeDasharray="3 3"
+                      strokeWidth={1}
+                      label={{
+                        value: yr.slice(0, 4),
+                        fill: '#94a3b8',
+                        fontSize: 9,
+                        position: 'insideTopLeft',
+                      }}
+                    />
+                  ))}
+
                   <Line
                     type="monotone"
                     dataKey="trend"
@@ -209,9 +314,9 @@ export const ExplanationReportPage: React.FC = () => {
           </p>
 
           {seasonalData.length > 0 ? (
-            <div className="h-48 w-full pt-1">
+            <div className="h-52 w-full pt-1">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={seasonalData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                <LineChart data={seasonalData} margin={{ top: 10, right: 20, left: 0, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                   <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748b' }} />
                   <YAxis
@@ -222,6 +327,24 @@ export const ExplanationReportPage: React.FC = () => {
                     formatter={(value: any) => [Number(value).toLocaleString(), 'Seasonal Component']}
                   />
                   <ReferenceLine y={0} stroke="#cbd5e1" strokeDasharray="3 3" />
+
+                  {/* Subtle grey vertical divider lines on January (Year Start) */}
+                  {seasonalYearStarts.map((yr) => (
+                    <ReferenceLine
+                      key={yr}
+                      x={yr}
+                      stroke="#e2e8f0"
+                      strokeDasharray="3 3"
+                      strokeWidth={1}
+                      label={{
+                        value: yr.slice(0, 4),
+                        fill: '#94a3b8',
+                        fontSize: 9,
+                        position: 'insideTopLeft',
+                      }}
+                    />
+                  ))}
+
                   <Line
                     type="monotone"
                     dataKey="seasonal"
@@ -235,7 +358,7 @@ export const ExplanationReportPage: React.FC = () => {
               </ResponsiveContainer>
             </div>
           ) : (
-            <div className="h-48 flex items-center justify-center bg-slate-50 border border-dashed border-slate-200 rounded-lg text-xs text-slate-400">
+            <div className="h-52 flex items-center justify-center bg-slate-50 border border-dashed border-slate-200 rounded-lg text-xs text-slate-400">
               No strong seasonal pattern to display.
             </div>
           )}
@@ -283,14 +406,14 @@ export const ExplanationReportPage: React.FC = () => {
           <span>Diagnostic Methodology & Limitations</span>
         </div>
         <ul className="list-disc pl-5 space-y-1 text-slate-500">
-          {report.limitations.map((lim, i) => (
+          {(report.limitations || []).map((lim, i) => (
             <li key={i}>{lim}</li>
           ))}
           <li>
-            Zero actual values in the validation set produce undefined MAPE and are flagged to prevent misleading tournament winners.
+            Decomposition and ACF diagnostics are purely descriptive and evaluate historical statistical patterns without asserting external causality.
           </li>
           <li>
-            Decomposition and ACF diagnostics are purely descriptive and do not assert causality.
+            Zero actual values produce undefined percentage changes and are handled gracefully to preserve data integrity.
           </li>
         </ul>
       </div>

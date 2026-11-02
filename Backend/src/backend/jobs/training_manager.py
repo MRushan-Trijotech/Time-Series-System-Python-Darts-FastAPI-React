@@ -40,6 +40,13 @@ class JobState:
     error: str | None = None
     log_tail: list[str] = field(default_factory=list)
     results: dict[str, Any] | None = None
+    # Entity-wise background training state
+    entity_status: str = "pending"  # "pending" | "running" | "completed" | "failed"
+    entity_progress_completed: int = 0
+    entity_progress_total: int = 0
+    entity_current_segment: str = ""
+    entity_results: dict[str, Any] | None = None
+    entity_error: str | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _start: float = field(default_factory=time.time, repr=False)
 
@@ -62,6 +69,20 @@ class JobState:
                     "total": self.progress_total,
                     "current_model": self.current_model,
                     "message": self.log_tail[-1] if self.log_tail else "",
+                },
+                "entity_training": {
+                    "status": self.entity_status,
+                    "progress": {
+                        "completed": self.entity_progress_completed,
+                        "total": self.entity_progress_total,
+                        "current_segment": self.entity_current_segment,
+                        "percent": (
+                            round((self.entity_progress_completed / self.entity_progress_total) * 100, 1)
+                            if self.entity_progress_total > 0
+                            else 0.0
+                        ),
+                    },
+                    "error": self.entity_error,
                 },
                 "elapsed_seconds": round(self.elapsed_seconds, 1),
                 "error": self.error,
@@ -102,6 +123,8 @@ def _run_training(
             frequency=frequency,
             bu_entities=request.bu_entities,
             accounts=request.accounts,
+            train_start=request.train_start,
+            train_end=request.train_end,
         )
         total_ts = series_result.total_series
         n_obs = len(total_ts)
@@ -249,9 +272,22 @@ def _run_training(
                 )
             )
 
+        # Configuration summary for display on reports
+        selected_bus = list(request.bu_entities.keys()) if request.bu_entities else (request.filters.get("Business unit") or [])
+        config_summary = {
+            "business_units": selected_bus,
+            "bu_entities": request.bu_entities or {},
+            "accounts": request.accounts or [],
+            "forecast_horizon": request.forecast_horizon,
+            "train_start": str(series_result.date_range_start.date()) if series_result else (request.train_start or ""),
+            "train_end": str(series_result.date_range_end.date()) if series_result else (request.train_end or ""),
+            "total_observations": n_obs,
+        }
+
         results = {
             "forecast_report": {
                 "job_id": job.job_id,
+                "configuration": config_summary,
                 "best_model": best.model_name,
                 "selection_metric": "MAPE",
                 "validation": {
@@ -288,6 +324,7 @@ def _run_training(
             },
             "explanation_report": {
                 "job_id": job.job_id,
+                "configuration": config_summary,
                 "best_model": best.model_name,
                 "model_family": model_family,
                 "why_selected": (
@@ -337,6 +374,15 @@ def _run_training(
         job.status = "completed"
         job.log("Training completed successfully.")
 
+        # Launch background entity-wise segment training
+        entity_thread = threading.Thread(
+            target=_run_entity_training,
+            args=(job, request, long_df, dimension_columns, frequency, forecast_result.dates),
+            daemon=True,
+            name=f"entity-training-{job.job_id[:8]}",
+        )
+        entity_thread.start()
+
     except Exception as exc:
         import traceback
         job.error = str(exc)
@@ -344,6 +390,288 @@ def _run_training(
         job.stage = "failed"
         job.log(f"ERROR: {exc}")
         # Log full traceback to server stderr (not exposed to client)
+        traceback.print_exc()
+
+
+def _run_entity_training(
+    job: JobState,
+    request: TrainingRequest,
+    long_df: pd.DataFrame,
+    dimension_columns: list[str],
+    frequency: str,
+    forecast_dates: list[str],
+) -> None:
+    """
+    Background worker that trains candidate models for each selected Business Unit
+    and Legal Entity, selects the best champion model per segment, generates
+    forecasts, and computes the monthly hierarchical distribution percentages.
+    """
+    try:
+        job.entity_status = "running"
+        bu_col = next((c for c in dimension_columns if "business unit" in c.lower()), "Business unit")
+        ent_col = next((c for c in dimension_columns if "legal_entity" in c.lower() or "legal entity" in c.lower()), "SAC_Legal_Entity")
+
+        # Discover Business Units and Entities
+        bu_entities: dict[str, list[str]] = {}
+        if request.bu_entities:
+            for bu, ents in request.bu_entities.items():
+                if ents:
+                    bu_entities[bu] = list(ents)
+                elif bu_col in long_df.columns and ent_col in long_df.columns:
+                    sub = long_df[long_df[bu_col] == bu]
+                    bu_entities[bu] = sorted(sub[ent_col].dropna().astype(str).unique().tolist())
+                else:
+                    bu_entities[bu] = []
+        elif bu_col in long_df.columns and ent_col in long_df.columns:
+            selected_bus = request.filters.get(bu_col) if request.filters else None
+            df_filtered = long_df[long_df[bu_col].isin(selected_bus)] if selected_bus else long_df
+            for bu in sorted(df_filtered[bu_col].dropna().astype(str).unique().tolist()):
+                sub = df_filtered[df_filtered[bu_col] == bu]
+                bu_entities[bu] = sorted(sub[ent_col].dropna().astype(str).unique().tolist())
+
+        # Collect all entity segments
+        entity_segments: list[tuple[str, str]] = []
+        for bu, ents in bu_entities.items():
+            for ent in ents:
+                entity_segments.append((bu, ent))
+
+        unique_bus = list(bu_entities.keys())
+        total_steps = len(entity_segments) + len(unique_bus)
+        job.entity_progress_total = max(1, total_steps)
+        job.entity_progress_completed = 0
+
+        target_months = [str(d)[:7] for d in forecast_dates]
+        entity_results_map: dict[tuple[str, str], dict[str, Any]] = {}
+
+        # ── 1. Train candidate models for each Legal Entity ─────────────
+        for bu, ent in entity_segments:
+            job.entity_current_segment = f"{bu} • Entity {ent}"
+            try:
+                # Build series for this single entity
+                seg_res = series_builder.build_aggregate_series(
+                    long_df=long_df,
+                    filters=request.filters,
+                    dimension_columns=dimension_columns,
+                    frequency=frequency,
+                    bu_entities={bu: [ent]},
+                    accounts=request.accounts,
+                    train_start=request.train_start,
+                    train_end=request.train_end,
+                )
+                seg_ts = seg_res.total_series
+                n_seg_obs = len(seg_ts)
+
+                if n_seg_obs < 13:
+                    from darts.models import NaiveMean
+                    with _warnings.catch_warnings():
+                        _warnings.simplefilter("ignore")
+                        base_model = NaiveMean()
+                        base_model.fit(seg_ts)
+                        fc_ts = base_model.predict(request.forecast_horizon)
+                        fc_pts = extract_series_points(fc_ts)
+                        fc_map = {p["date"][:7]: float(p["value"] or 0.0) for p in fc_pts}
+                    entity_results_map[(bu, ent)] = {
+                        "best_model": "NaiveMean",
+                        "mape": None,
+                        "forecast": {m: fc_map.get(m, 0.0) for m in target_months},
+                    }
+                else:
+                    val_size = max(1, min(6, int(n_seg_obs * 0.25)))
+                    seg_train_ts = seg_ts[:-val_size]
+                    seg_val_ts = seg_ts[-val_size:]
+
+                    eligible_candidates = model_registry.filter_eligible_models(
+                        request.candidate_models,
+                        n_train_observations=len(seg_train_ts),
+                    )
+                    if not eligible_candidates:
+                        from darts.models import NaiveMean
+                        with _warnings.catch_warnings():
+                            _warnings.simplefilter("ignore")
+                            base_model = NaiveMean()
+                            base_model.fit(seg_ts)
+                            fc_ts = base_model.predict(request.forecast_horizon)
+                            fc_pts = extract_series_points(fc_ts)
+                            fc_map = {p["date"][:7]: float(p["value"] or 0.0) for p in fc_pts}
+                        entity_results_map[(bu, ent)] = {
+                            "best_model": "NaiveMean",
+                            "mape": None,
+                            "forecast": {m: fc_map.get(m, 0.0) for m in target_months},
+                        }
+                    else:
+                        with _warnings.catch_warnings():
+                            _warnings.simplefilter("ignore")
+                            c_res = model_training.evaluate_candidates(
+                                model_names=eligible_candidates,
+                                train_series=seg_train_ts,
+                                validation_series=seg_val_ts,
+                            )
+                        best_cand = model_training.select_best(c_res)
+                        best_model_name = best_cand.model_name if best_cand else eligible_candidates[0]
+                        best_mape = round(best_cand.mape, 2) if (best_cand and best_cand.mape is not None) else None
+
+                        # Forecast with best model
+                        with _warnings.catch_warnings():
+                            _warnings.simplefilter("ignore")
+                            fc_res = generate_forecast(
+                                model_name=best_model_name,
+                                full_series=seg_ts,
+                                horizon=request.forecast_horizon,
+                            )
+                            fc_map = {str(d)[:7]: float(v or 0.0) for d, v in zip(fc_res.dates, fc_res.values)}
+
+                        entity_results_map[(bu, ent)] = {
+                            "best_model": best_model_name,
+                            "mape": best_mape,
+                            "forecast": {m: fc_map.get(m, 0.0) for m in target_months},
+                        }
+            except Exception:
+                # Fallback on all zero if no data or series build fails
+                entity_results_map[(bu, ent)] = {
+                    "best_model": "ConstantZero",
+                    "mape": None,
+                    "forecast": {m: 0.0 for m in target_months},
+                }
+
+            job.entity_progress_completed += 1
+
+        # ── 2. Train / evaluate candidate models for each Business Unit ─
+        bu_best_models: dict[str, dict[str, Any]] = {}
+        for bu in unique_bus:
+            job.entity_current_segment = f"Business Unit {bu}"
+            ents = bu_entities.get(bu, [])
+            try:
+                bu_seg_res = series_builder.build_aggregate_series(
+                    long_df=long_df,
+                    filters=request.filters,
+                    dimension_columns=dimension_columns,
+                    frequency=frequency,
+                    bu_entities={bu: ents} if ents else None,
+                    accounts=request.accounts,
+                    train_start=request.train_start,
+                    train_end=request.train_end,
+                )
+                bu_ts = bu_seg_res.total_series
+                n_bu_obs = len(bu_ts)
+                if n_bu_obs >= 13:
+                    val_size = max(1, min(6, int(n_bu_obs * 0.25)))
+                    bu_train_ts = bu_ts[:-val_size]
+                    bu_val_ts = bu_ts[-val_size:]
+                    eligible = model_registry.filter_eligible_models(
+                        request.candidate_models,
+                        n_train_observations=len(bu_train_ts),
+                    )
+                    if eligible:
+                        with _warnings.catch_warnings():
+                            _warnings.simplefilter("ignore")
+                            c_res = model_training.evaluate_candidates(
+                                model_names=eligible,
+                                train_series=bu_train_ts,
+                                validation_series=bu_val_ts,
+                            )
+                        best_cand = model_training.select_best(c_res)
+                        bu_best_models[bu] = {
+                            "best_model": best_cand.model_name if best_cand else eligible[0],
+                            "mape": round(best_cand.mape, 2) if (best_cand and best_cand.mape is not None) else None,
+                        }
+                    else:
+                        bu_best_models[bu] = {"best_model": "NaiveMean", "mape": None}
+                else:
+                    bu_best_models[bu] = {"best_model": "NaiveMean", "mape": None}
+            except Exception:
+                bu_best_models[bu] = {"best_model": "NaiveMean", "mape": None}
+
+            job.entity_progress_completed += 1
+
+        # ── 3. Assemble Monthly Hierarchy & Percentage Distribution ────
+        hierarchy: list[dict[str, Any]] = []
+        for m in target_months:
+            # Calculate BU forecasts (sum of its entities)
+            bu_forecast_totals: dict[str, float] = {}
+            for bu in unique_bus:
+                ents = bu_entities.get(bu, [])
+                bu_total_m = sum(entity_results_map.get((bu, ent), {}).get("forecast", {}).get(m, 0.0) for ent in ents)
+                bu_forecast_totals[bu] = bu_total_m
+
+            # Month total is sum of all BUs
+            month_total = sum(bu_forecast_totals.values())
+
+            bu_list: list[dict[str, Any]] = []
+            for bu in unique_bus:
+                bu_val = bu_forecast_totals[bu]
+                bu_pct = (bu_val / month_total * 100.0) if abs(month_total) > 1e-6 else 0.0
+
+                ents = bu_entities.get(bu, [])
+                ent_list: list[dict[str, Any]] = []
+                for ent in ents:
+                    ent_info = entity_results_map.get((bu, ent), {})
+                    ent_val = ent_info.get("forecast", {}).get(m, 0.0)
+                    ent_pct = (ent_val / month_total * 100.0) if abs(month_total) > 1e-6 else 0.0
+                    ent_list.append({
+                        "entity": ent,
+                        "forecast": round(ent_val, 2),
+                        "distribution_pct": round(ent_pct, 2),
+                        "best_model": ent_info.get("best_model", "NaiveSeasonal"),
+                        "mape": ent_info.get("mape"),
+                    })
+
+                bu_info = bu_best_models.get(bu, {"best_model": "NaiveSeasonal", "mape": None})
+                bu_list.append({
+                    "business_unit": bu,
+                    "forecast": round(bu_val, 2),
+                    "distribution_pct": round(bu_pct, 2),
+                    "best_model": bu_info.get("best_model", "NaiveSeasonal"),
+                    "mape": bu_info.get("mape"),
+                    "entities": ent_list,
+                })
+
+            hierarchy.append({
+                "month": m,
+                "total_forecast": round(month_total, 2),
+                "distribution_pct": 100.0,
+                "business_units": bu_list,
+            })
+
+        # Resolve target account and description for Story-style reporting
+        target_account = request.accounts[0] if request.accounts else "Target"
+        desc_col = next((c for c in dimension_columns if "description" in c.lower()), None)
+        target_desc = target_account
+        if desc_col and desc_col in long_df.columns:
+            acc_col = next((c for c in dimension_columns if c.lower() == "account"), "ACCOUNT")
+            if acc_col in long_df.columns:
+                matches = long_df[long_df[acc_col] == target_account][desc_col].dropna()
+                if not matches.empty:
+                    target_desc = str(matches.iloc[0])
+
+        entity_forecasts_list = [
+            {
+                "business_unit": bu,
+                "entity": ent,
+                "account": target_account,
+                "description": target_desc,
+                "forecast": entity_results_map.get((bu, ent), {}).get("forecast", {}),
+                "best_model": entity_results_map.get((bu, ent), {}).get("best_model", ""),
+            }
+            for (bu, ent) in entity_segments
+        ]
+
+        job.entity_results = json_safe({
+            "months": target_months,
+            "hierarchy": hierarchy,
+            "entity_forecasts": entity_forecasts_list,
+            "target_account": target_account,
+            "target_description": target_desc,
+            "total_segments": len(entity_segments),
+            "total_business_units": len(unique_bus),
+        })
+        job.entity_status = "completed"
+        job.log(f"Entity-wise background training completed ({len(entity_segments)} entities across {len(unique_bus)} BUs).")
+
+    except Exception as exc:
+        import traceback
+        job.entity_status = "failed"
+        job.entity_error = str(exc)
+        job.log(f"Entity training failed: {exc}")
         traceback.print_exc()
 
 
