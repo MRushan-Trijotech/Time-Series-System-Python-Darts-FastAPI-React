@@ -16,7 +16,6 @@ RUN uv sync --frozen --no-dev || uv pip install -e .
 
 # Copy backend source code & sample data
 COPY src ./src
-COPY data ./data
 
 ENV PORT=8000
 ENV PYTHONUNBUFFERED=1
