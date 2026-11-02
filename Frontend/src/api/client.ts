@@ -11,8 +11,13 @@ import type {
   EntityWiseReportResponse,
 } from '../types'
 
+// Resolve API base URL: prioritize environment variable (for Render production)
+// or fallback to local proxy path '/api' (for local Vite development)
+const rawBaseURL = import.meta.env.VITE_API_BASE_URL || '/api'
+export const API_BASE_URL = rawBaseURL.endsWith('/') ? rawBaseURL.slice(0, -1) : rawBaseURL
+
 export const api = axios.create({
-  baseURL: '/api',
+  baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
   },

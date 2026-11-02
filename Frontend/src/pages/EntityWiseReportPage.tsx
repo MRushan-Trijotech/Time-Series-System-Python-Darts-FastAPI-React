@@ -16,7 +16,7 @@ import {
   TrendingUp,
   FileSpreadsheet,
 } from 'lucide-react'
-import { getEntityWiseReport } from '../api/client'
+import { API_BASE_URL, getEntityWiseReport } from '../api/client'
 import { useSession } from '../contexts/SessionContext'
 import type { EntityWiseReportResponse } from '../types'
 
@@ -269,7 +269,7 @@ export const EntityWiseReportPage: React.FC = () => {
   const handleExportDownload = (extension: 'xlsx' | 'csv') => {
     if (!jobId) return
     const link = document.createElement('a')
-    link.href = `/api/reports/${jobId}/export/entity-wise.${extension}`
+    link.href = `${API_BASE_URL}/reports/${jobId}/export/entity-wise.${extension}`
     link.download = `entity_wise_forecast_${jobId.slice(0, 8)}.${extension}`
     document.body.appendChild(link)
     link.click()

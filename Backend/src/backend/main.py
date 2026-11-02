@@ -1,4 +1,5 @@
 """FastAPI entry point for the Time Series Forecasting application."""
+import os
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,10 +13,17 @@ app = FastAPI(
     description="Enterprise Time Series Forecasting API inspired by SAP Analytics Cloud Smart Predict",
 )
 
-# CORS configuration for Vite frontend
+# CORS configuration supporting environment variable FRONTEND_URL
+# Supports single URL, comma-separated URLs, or fallback wildcard for local development
+frontend_env = os.getenv("FRONTEND_URL", "").strip()
+if frontend_env:
+    allowed_origins = [origin.strip() for origin in frontend_env.split(",") if origin.strip()]
+else:
+    allowed_origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow local Vite dev server and any network IP during development
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
