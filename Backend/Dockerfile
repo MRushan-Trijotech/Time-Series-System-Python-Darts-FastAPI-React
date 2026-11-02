@@ -14,10 +14,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 COPY pyproject.toml uv.lock* ./
 
 # Install third-party dependencies first without the root package
-# (avoids: "Expected a Python module at: src/backend/__init__.py")
 RUN uv sync --frozen --no-dev --no-install-project
 
-# Copy backend source code
+# Copy project files needed for package build (README.md is required by pyproject.toml)
+COPY README.md ./
 COPY src ./src
 
 # Install root project into the virtual environment
