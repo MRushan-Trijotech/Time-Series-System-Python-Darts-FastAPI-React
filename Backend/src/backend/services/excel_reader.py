@@ -7,11 +7,11 @@ import pandas as pd
 
 def list_sheets(path: Path) -> list[str]:
     """Return all worksheet names in the workbook."""
-    xl = pd.ExcelFile(path, engine="openpyxl")
-    return xl.sheet_names
+    with pd.ExcelFile(path, engine="openpyxl") as xl:
+        return list(xl.sheet_names)
 
 
-def load_raw_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
+def load_raw_sheet(path: Path, sheet_name: str, nrows: int | None = None) -> pd.DataFrame:
     """
     Load a worksheet without assuming any row is a header.
     Returns a DataFrame with integer column indices (0, 1, 2, ...).
@@ -21,6 +21,7 @@ def load_raw_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
         sheet_name=sheet_name,
         header=None,
         engine="openpyxl",
+        nrows=nrows,
     )
     return df
 

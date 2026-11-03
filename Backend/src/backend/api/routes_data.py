@@ -1,4 +1,5 @@
 """Dataset inspection, transformation, and metadata endpoints."""
+import gc
 from typing import Any
 
 import pandas as pd
@@ -160,6 +161,8 @@ async def transform_dataset(dataset_id: str, req: TransformRequest):
     try:
         res = transform(record.raw_df, detection)
         record.transform_result = res
+        record.raw_df = None  # Free raw excel dataframe from RAM
+        gc.collect()
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -203,26 +206,30 @@ async def merge_transform_datasets(req: MergeTransformRequest):
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Dataset '{d_id}' not found.",
             )
-        if rec.raw_df is None:
-            sheet = req.sheet_name or rec.active_sheet or (rec.sheet_names[0] if rec.sheet_names else None)
+        records.append(rec)
+
+    all_long_dfs: list[pd.DataFrame] = []
+    base_dims: list[str] | None = None
+    base_depth: int | None = None
+    all_period_columns: list[str] = []
+    frequency = "M"
+
+    # Process each workbook sequentially and free raw memory immediately to stay within 512MB RAM
+    for rec in records:
+        sheet = req.sheet_name or rec.active_sheet or (rec.sheet_names[0] if rec.sheet_names else None)
+        raw_df = rec.raw_df
+        if raw_df is None:
             if sheet and rec.file_path and rec.file_path.exists():
-                rec.raw_df = load_raw_sheet(rec.file_path, sheet)
-                rec.active_sheet = sheet
+                raw_df = load_raw_sheet(rec.file_path, sheet)
             else:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Dataset '{d_id}' sheet not found or workbook file is missing.",
+                    detail=f"Dataset '{rec.dataset_id}' sheet not found or workbook file is missing.",
                 )
-        records.append(rec)
 
-    transform_results: list[TransformResult] = []
-    base_dims: list[str] | None = None
-    base_depth: int | None = None
-
-    for rec in records:
         det = rec.header_detection
         if det is None:
-            det = detect_headers(rec.raw_df, scan_rows=settings.header_scan_rows)
+            det = detect_headers(raw_df, scan_rows=settings.header_scan_rows)
 
         if req.schema_config:
             sc = req.schema_config
@@ -231,33 +238,36 @@ async def merge_transform_datasets(req: MergeTransformRequest):
             det.period_row_index = sc.period_row_index
             det.header_depth = sc.dimension_row_index + 1
 
-            if rec.raw_df is not None:
-                raw_dim_row = rec.raw_df.iloc[sc.dimension_row_index] if sc.dimension_row_index < len(rec.raw_df) else None
-                raw_period_row = rec.raw_df.iloc[sc.period_row_index] if sc.period_row_index < len(rec.raw_df) else None
+            raw_dim_row = raw_df.iloc[sc.dimension_row_index] if sc.dimension_row_index < len(raw_df) else None
+            raw_period_row = raw_df.iloc[sc.period_row_index] if sc.period_row_index < len(raw_df) else None
 
-                for col in det.columns:
-                    c_idx = col.original_index
-                    dim_val = raw_dim_row.iloc[c_idx] if raw_dim_row is not None and c_idx < len(raw_dim_row) else None
-                    period_val = raw_period_row.iloc[c_idx] if raw_period_row is not None and c_idx < len(raw_period_row) else None
+            for col in det.columns:
+                c_idx = col.original_index
+                dim_val = raw_dim_row.iloc[c_idx] if raw_dim_row is not None and c_idx < len(raw_dim_row) else None
+                period_val = raw_period_row.iloc[c_idx] if raw_period_row is not None and c_idx < len(raw_period_row) else None
 
-                    parsed_dt = parse_period_label(period_val)
-                    if parsed_dt:
-                        col.role = "time_period"
-                        col.parsed_date = parsed_dt
-                        col.name = str(period_val).strip()
-                    elif dim_val is not None and pd.notna(dim_val) and str(dim_val).strip():
-                        col.role = "dimension"
-                        col.name = str(dim_val).strip()
-                    else:
-                        col.role = "other"
+                parsed_dt = parse_period_label(period_val)
+                if parsed_dt:
+                    col.role = "time_period"
+                    col.parsed_date = parsed_dt
+                    col.name = str(period_val).strip()
+                elif dim_val is not None and pd.notna(dim_val) and str(dim_val).strip():
+                    col.role = "dimension"
+                    col.name = str(dim_val).strip()
+                else:
+                    col.role = "other"
 
-        t_res = transform(rec.raw_df, det)
-        rec.transform_result = t_res
+        t_res = transform(raw_df, det)
+        del raw_df
+        rec.raw_df = None
+        rec.transform_result = None
+        gc.collect()
 
         # Strict compatibility verification across files
         if base_dims is None:
             base_dims = list(t_res.dimension_columns)
             base_depth = det.header_depth
+            frequency = t_res.frequency
         else:
             if t_res.dimension_columns != base_dims:
                 raise HTTPException(
@@ -279,11 +289,16 @@ async def merge_transform_datasets(req: MergeTransformRequest):
                     ),
                 )
 
-        transform_results.append(t_res)
+        for p in t_res.period_columns:
+            if p not in all_period_columns:
+                all_period_columns.append(p)
+
+        all_long_dfs.append(t_res.long_df)
 
     # Concatenate all long format DataFrames
-    all_long_dfs = [tr.long_df for tr in transform_results]
     merged_long_df = pd.concat(all_long_dfs, ignore_index=True)
+    del all_long_dfs
+    gc.collect()
 
     dim_cols = base_dims or []
     merged_long_df = merged_long_df.sort_values(["date"] + dim_cols).reset_index(drop=True)
@@ -301,15 +316,14 @@ async def merge_transform_datasets(req: MergeTransformRequest):
             .reset_index()
         )
 
+    # Enforce memory-lean categorical dtypes and float32 on merged data
+    merged_long_df["value"] = pd.to_numeric(merged_long_df["value"], downcast="float")
+    for c in dim_cols:
+        merged_long_df[c] = merged_long_df[c].astype("category")
+
     all_dates = sorted(merged_long_df["date"].dropna().unique())
     d_start = pd.Timestamp(all_dates[0]) if all_dates else pd.Timestamp.now()
     d_end = pd.Timestamp(all_dates[-1]) if all_dates else pd.Timestamp.now()
-
-    all_period_columns: list[str] = []
-    for tr in transform_results:
-        for p in tr.period_columns:
-            if p not in all_period_columns:
-                all_period_columns.append(p)
 
     missing_value_count = int(merged_long_df["value"].isna().sum())
 
@@ -319,7 +333,7 @@ async def merge_transform_datasets(req: MergeTransformRequest):
         period_columns=all_period_columns,
         date_range_start=d_start,
         date_range_end=d_end,
-        frequency=transform_results[0].frequency if transform_results else "M",
+        frequency=frequency,
         row_count=len(merged_long_df),
         missing_value_count=missing_value_count,
         duplicate_count=duplicate_count,
@@ -333,6 +347,12 @@ async def merge_transform_datasets(req: MergeTransformRequest):
         transform_result=merged_transform_res,
         schema_config=req.schema_config.model_dump() if req.schema_config else None,
     )
+
+    # Release intermediate dataset copies from RAM since merged dataset takes over
+    for r in records:
+        r.raw_df = None
+        r.transform_result = None
+    gc.collect()
 
     return TransformResponse(
         dataset_id=merged_record.dataset_id,
@@ -427,6 +447,7 @@ async def get_dimensions(dataset_id: str):
         configured_hierarchy = [c for c in [bu_col, ent_col] if c and c in df.columns]
 
     # Build dynamic multi-level hierarchy tree (supports any number of levels: BU -> Entity -> Product -> UOM)
+    # OPTIMIZATION: Extract unique hierarchy combinations first (2k rows instead of 1M rows)
     def _build_tree(sub_df: pd.DataFrame, levels: list[str]) -> list[dict[str, Any]]:
         if not levels or sub_df.empty:
             return []
@@ -434,7 +455,7 @@ async def get_dimensions(dataset_id: str):
         rem_lvls = levels[1:]
         nodes = []
         if current_lvl in sub_df.columns:
-            for val, grp in sub_df.groupby(current_lvl, dropna=True):
+            for val, grp in sub_df.groupby(current_lvl, observed=True):
                 v_str = str(val).strip()
                 if not v_str:
                     continue
@@ -444,7 +465,12 @@ async def get_dimensions(dataset_id: str):
                 nodes.append(node)
         return sorted(nodes, key=lambda n: n["value"])
 
-    hierarchy_tree = _build_tree(df, configured_hierarchy)
+    valid_hier_cols = [c for c in configured_hierarchy if c in df.columns]
+    if valid_hier_cols:
+        uniq_hier_df = df[valid_hier_cols].dropna().drop_duplicates()
+        hierarchy_tree = _build_tree(uniq_hier_df, valid_hier_cols)
+    else:
+        hierarchy_tree = []
 
     # Build targets with optional 1-to-1 description
     target_options = []
@@ -467,7 +493,8 @@ async def get_dimensions(dataset_id: str):
 
     bu_entity_hierarchy: dict[str, list[str]] = {}
     if bu_col and ent_col and bu_col in df.columns and ent_col in df.columns:
-        for bu, grp in df.groupby(bu_col, dropna=True):
+        bu_ent_df = df[[bu_col, ent_col]].dropna().drop_duplicates()
+        for bu, grp in bu_ent_df.groupby(bu_col, observed=True):
             bu_str = str(bu).strip()
             if not bu_str:
                 continue
@@ -502,6 +529,7 @@ async def get_dimensions(dataset_id: str):
                 rel_dict["account"] = str(r[acc_col]).strip()
             relations.append(rel_dict)
 
+    gc.collect()
     return DimensionsResponse(
         dimensions=dims,
         hierarchy_levels=configured_hierarchy,

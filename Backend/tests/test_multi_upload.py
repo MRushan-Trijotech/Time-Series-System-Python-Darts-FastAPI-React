@@ -11,12 +11,16 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 def file_2023():
     path = DATA_DIR / "2023.xlsx"
     if not path.exists():
+        path = DATA_DIR / "Product Wise" / "2023.xlsx"
+    if not path.exists():
         pytest.skip(f"Missing test file: {path}")
     return path
 
 @pytest.fixture
 def file_2024():
     path = DATA_DIR / "2024 Data.xlsx"
+    if not path.exists():
+        path = DATA_DIR / "Product Wise" / "2024 Data.xlsx"
     if not path.exists():
         pytest.skip(f"Missing test file: {path}")
     return path

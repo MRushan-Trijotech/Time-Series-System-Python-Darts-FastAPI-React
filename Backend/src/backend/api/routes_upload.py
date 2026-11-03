@@ -114,11 +114,13 @@ async def upload_multiple_files(files: list[UploadFile] = File(...)):
             )
 
         first_sheet = sheets[0]
-        raw_df = load_raw_sheet(file_path, first_sheet)
-        detection = detect_headers(raw_df, scan_rows=settings.header_scan_rows)
+        # Scan first 25 rows for lightweight header detection to avoid memory spikes on multi-file uploads
+        header_sample_df = load_raw_sheet(file_path, first_sheet, nrows=25)
+        detection = detect_headers(header_sample_df, scan_rows=settings.header_scan_rows)
+        del header_sample_df
 
         record = save_dataset(filename=filename, file_path=file_path, sheet_names=sheets)
-        record.raw_df = raw_df
+        record.raw_df = None  # Loaded on-demand during transformation to keep RAM footprint minimal
         record.active_sheet = first_sheet
         record.header_detection = detection
 

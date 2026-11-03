@@ -529,10 +529,9 @@ export const ConfigurationPage: React.FC = () => {
     return Object.keys(map).length > 0 ? map : undefined
   }, [hierarchyLevels, hierarchyTree, selectedByLevel])
 
-  // Fetch series info when target or selections change
+  // Fetch series info when target or selections change (waits for initial dimensions load to finish)
   const fetchSeriesInfo = useCallback(async () => {
-    if (!datasetId || !selectedTarget) {
-      setSeriesInfo(null)
+    if (!datasetId || !selectedTarget || isLoading) {
       return
     }
     setSeriesInfoLoading(true)
@@ -551,7 +550,7 @@ export const ConfigurationPage: React.FC = () => {
     } finally {
       setSeriesInfoLoading(false)
     }
-  }, [datasetId, selectedTarget, hierarchySelections, payloadBUEntities])
+  }, [datasetId, selectedTarget, isLoading, hierarchySelections, payloadBUEntities])
 
   useEffect(() => {
     const timer = setTimeout(() => {

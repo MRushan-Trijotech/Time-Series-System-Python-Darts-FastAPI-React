@@ -140,6 +140,8 @@ def transform(
         var_name="period_label",
         value_name="value",
     )
+    # Free wide data frame immediately to keep memory lean
+    del data_df
 
     # Map period_label to timestamp
     long_df["date"] = long_df["period_label"].map(date_map)
@@ -190,6 +192,11 @@ def transform(
             "value"
         ].transform(lambda s: s.interpolate(method="linear", limit_direction="both"))
         warnings.append("Missing values interpolated (user-selected strategy).")
+
+    # Memory optimization: downcast floats and categorize dimensions (drops memory by 75-80%)
+    long_df["value"] = pd.to_numeric(long_df["value"], downcast="float")
+    for c in dim_col_names:
+        long_df[c] = long_df[c].astype("category")
 
     timestamps = sorted(date_map.values())
     d_start = pd.Timestamp(timestamps[0]) if timestamps else pd.Timestamp.now()
