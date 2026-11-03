@@ -106,6 +106,7 @@ def _run_training(
     long_df: pd.DataFrame,
     dimension_columns: list[str],
     frequency: str,
+    schema_config: dict[str, Any] | None = None,
 ) -> None:
     """
     The actual training logic — runs in a background thread.
@@ -116,6 +117,10 @@ def _run_training(
         job.stage = "building_series"
         job.log("Building aggregate time series from filtered data…")
 
+        target_col = schema_config.get("target_column") if schema_config else None
+        if not target_col:
+            target_col = next((c for c in dimension_columns if c.lower() == "account"), dimension_columns[0] if dimension_columns else "ACCOUNT")
+
         series_result = series_builder.build_aggregate_series(
             long_df=long_df,
             filters=request.filters,
@@ -125,6 +130,9 @@ def _run_training(
             accounts=request.accounts,
             train_start=request.train_start,
             train_end=request.train_end,
+            hierarchy_selections=request.hierarchy_selections,
+            target_column=target_col,
+            target_value=request.target_value,
         )
         total_ts = series_result.total_series
         n_obs = len(total_ts)
@@ -273,15 +281,54 @@ def _run_training(
             )
 
         # Configuration summary for display on reports
-        selected_bus = list(request.bu_entities.keys()) if request.bu_entities else (request.filters.get("Business unit") or [])
+        target_col = schema_config.get("target_column") if schema_config else None
+        desc_col = schema_config.get("description_column") if schema_config else None
+        if not target_col:
+            target_col = next((c for c in dimension_columns if c.lower() == "account"), dimension_columns[0] if dimension_columns else "ACCOUNT")
+        if not desc_col:
+            desc_col = next((c for c in dimension_columns if "description" in c.lower()), None)
+
+        target_val = request.target_value or (request.accounts[0] if request.accounts else None)
+        target_desc = str(target_val or "")
+        if desc_col and desc_col in long_df.columns and target_col in long_df.columns and target_val:
+            matches = long_df[long_df[target_col].astype(str) == str(target_val)][desc_col].dropna()
+            if not matches.empty:
+                target_desc = str(matches.iloc[0]).strip()
+
+        hierarchy_levels: list[str] = []
+        if schema_config and schema_config.get("hierarchy_columns"):
+            hierarchy_levels = [c for c in schema_config["hierarchy_columns"] if c in long_df.columns]
+        if not hierarchy_levels:
+            bu_c = next((c for c in dimension_columns if "business unit" in c.lower()), None)
+            ent_c = next((c for c in dimension_columns if "legal_entity" in c.lower() or "legal entity" in c.lower()), None)
+            if bu_c and ent_c and bu_c in long_df.columns and ent_c in long_df.columns:
+                hierarchy_levels = [bu_c, ent_c]
+            else:
+                hierarchy_levels = [c for c in dimension_columns if c != target_col and c != desc_col and c in long_df.columns]
+
+        hierarchy_summary: dict[str, list[str]] = {}
+        for h_lvl in hierarchy_levels:
+            if request.hierarchy_selections:
+                vals = sorted(list({s[h_lvl] for s in request.hierarchy_selections if h_lvl in s and s[h_lvl]}))
+                hierarchy_summary[h_lvl] = vals
+            elif request.filters and h_lvl in request.filters:
+                hierarchy_summary[h_lvl] = request.filters[h_lvl]
+            else:
+                hierarchy_summary[h_lvl] = []
+
         config_summary = {
-            "business_units": selected_bus,
-            "bu_entities": request.bu_entities or {},
-            "accounts": request.accounts or [],
+            "hierarchy_levels": hierarchy_levels,
+            "hierarchy_summary": hierarchy_summary,
+            "target_column": target_col,
+            "target_value": target_val,
+            "target_description": target_desc,
+            "accounts": [target_val] if target_val else (request.accounts or []),
             "forecast_horizon": request.forecast_horizon,
             "train_start": str(series_result.date_range_start.date()) if series_result else (request.train_start or ""),
             "train_end": str(series_result.date_range_end.date()) if series_result else (request.train_end or ""),
             "total_observations": n_obs,
+            "business_units": hierarchy_summary.get(hierarchy_levels[0] if hierarchy_levels else "Business unit", []),
+            "bu_entities": request.bu_entities or {},
         }
 
         results = {
@@ -374,14 +421,14 @@ def _run_training(
         job.status = "completed"
         job.log("Training completed successfully.")
 
-        # Launch background entity-wise segment training
-        entity_thread = threading.Thread(
-            target=_run_entity_training,
-            args=(job, request, long_df, dimension_columns, frequency, forecast_result.dates),
+        # Launch background segment-wise training
+        segment_thread = threading.Thread(
+            target=_run_segment_training,
+            args=(job, request, long_df, dimension_columns, frequency, forecast_result.dates, schema_config),
             daemon=True,
-            name=f"entity-training-{job.job_id[:8]}",
+            name=f"segment-training-{job.job_id[:8]}",
         )
-        entity_thread.start()
+        segment_thread.start()
 
     except Exception as exc:
         import traceback
@@ -393,75 +440,144 @@ def _run_training(
         traceback.print_exc()
 
 
-def _run_entity_training(
+def _run_segment_training(
     job: JobState,
     request: TrainingRequest,
     long_df: pd.DataFrame,
     dimension_columns: list[str],
     frequency: str,
     forecast_dates: list[str],
+    schema_config: dict[str, Any] | None = None,
 ) -> None:
     """
-    Background worker that trains candidate models for each selected Business Unit
-    and Legal Entity, selects the best champion model per segment, generates
-    forecasts, and computes the monthly hierarchical distribution percentages.
+    Background worker that trains candidate models for each leaf segment
+    in the multi-level hierarchy (e.g. BU -> Legal Entity -> Product -> UOM),
+    selects champion models, generates forecasts, and computes hierarchical distribution percentages.
     """
     try:
         job.entity_status = "running"
-        bu_col = next((c for c in dimension_columns if "business unit" in c.lower()), "Business unit")
-        ent_col = next((c for c in dimension_columns if "legal_entity" in c.lower() or "legal entity" in c.lower()), "SAC_Legal_Entity")
 
-        # Discover Business Units and Entities
-        bu_entities: dict[str, list[str]] = {}
-        if request.bu_entities:
+        # 1. Resolve Target Column & Description Column
+        target_col = None
+        desc_col = None
+        if schema_config:
+            target_col = schema_config.get("target_column")
+            desc_col = schema_config.get("description_column")
+        if not target_col:
+            target_col = next((c for c in dimension_columns if c.lower() == "account"), dimension_columns[0] if dimension_columns else "ACCOUNT")
+        if not desc_col:
+            desc_col = next((c for c in dimension_columns if "description" in c.lower()), None)
+
+        # 2. Resolve Target Value & Description
+        target_val = request.target_value or (request.accounts[0] if request.accounts else None)
+        if not target_val and target_col in long_df.columns:
+            non_empty = long_df[target_col].dropna()
+            target_val = str(non_empty.iloc[0]).strip() if not non_empty.empty else "Target"
+        if not target_val:
+            target_val = "Target"
+
+        target_desc = str(target_val)
+        if desc_col and desc_col in long_df.columns and target_col in long_df.columns:
+            matches = long_df[long_df[target_col].astype(str) == str(target_val)][desc_col].dropna()
+            if not matches.empty:
+                target_desc = str(matches.iloc[0]).strip()
+
+        # 3. Resolve Hierarchy Levels
+        hierarchy_levels: list[str] = []
+        if schema_config and schema_config.get("hierarchy_columns"):
+            hierarchy_levels = [c for c in schema_config["hierarchy_columns"] if c in long_df.columns]
+        if not hierarchy_levels:
+            bu_c = next((c for c in dimension_columns if "business unit" in c.lower()), None)
+            ent_c = next((c for c in dimension_columns if "legal_entity" in c.lower() or "legal entity" in c.lower()), None)
+            if bu_c and ent_c and bu_c in long_df.columns and ent_c in long_df.columns:
+                hierarchy_levels = [bu_c, ent_c]
+            else:
+                hierarchy_levels = [c for c in dimension_columns if c != target_col and c != desc_col and c in long_df.columns]
+        if not hierarchy_levels and dimension_columns:
+            hierarchy_levels = [dimension_columns[0]]
+
+        # 4. Discover Leaf Segments
+        leaf_segments: list[dict[str, str]] = []
+        if request.hierarchy_selections:
+            for s in request.hierarchy_selections:
+                cleaned_seg = {str(k): str(v).strip() for k, v in s.items() if k in long_df.columns}
+                if cleaned_seg:
+                    leaf_segments.append(cleaned_seg)
+        elif request.bu_entities:
+            bu_c = hierarchy_levels[0] if hierarchy_levels else "Business unit"
+            ent_c = hierarchy_levels[1] if len(hierarchy_levels) > 1 else "SAC_Legal_Entity"
             for bu, ents in request.bu_entities.items():
                 if ents:
-                    bu_entities[bu] = list(ents)
-                elif bu_col in long_df.columns and ent_col in long_df.columns:
-                    sub = long_df[long_df[bu_col] == bu]
-                    bu_entities[bu] = sorted(sub[ent_col].dropna().astype(str).unique().tolist())
+                    for ent in ents:
+                        leaf_segments.append({bu_c: str(bu), ent_c: str(ent)})
                 else:
-                    bu_entities[bu] = []
-        elif bu_col in long_df.columns and ent_col in long_df.columns:
-            selected_bus = request.filters.get(bu_col) if request.filters else None
-            df_filtered = long_df[long_df[bu_col].isin(selected_bus)] if selected_bus else long_df
-            for bu in sorted(df_filtered[bu_col].dropna().astype(str).unique().tolist()):
-                sub = df_filtered[df_filtered[bu_col] == bu]
-                bu_entities[bu] = sorted(sub[ent_col].dropna().astype(str).unique().tolist())
+                    leaf_segments.append({bu_c: str(bu)})
+        else:
+            sub_df = long_df.copy()
+            if target_col in sub_df.columns and target_val:
+                sub_df = sub_df[sub_df[target_col].astype(str) == str(target_val)]
+            if request.filters:
+                for col, vals in request.filters.items():
+                    if col in sub_df.columns and vals:
+                        sub_df = sub_df[sub_df[col].astype(str).isin([str(v) for v in vals])]
 
-        # Collect all entity segments
-        entity_segments: list[tuple[str, str]] = []
-        for bu, ents in bu_entities.items():
-            for ent in ents:
-                entity_segments.append((bu, ent))
+            if not sub_df.empty and hierarchy_levels:
+                combos = sub_df[hierarchy_levels].dropna().drop_duplicates()
+                for _, row in combos.iterrows():
+                    leaf_segments.append({col: str(row[col]).strip() for col in hierarchy_levels})
 
-        unique_bus = list(bu_entities.keys())
-        total_steps = len(entity_segments) + len(unique_bus)
+        # Deduplicate leaf segments
+        unique_leaf_segments: list[dict[str, str]] = []
+        seen_leaves = set()
+        for leaf in leaf_segments:
+            leaf_key = tuple(sorted(leaf.items()))
+            if leaf_key not in seen_leaves:
+                seen_leaves.add(leaf_key)
+                unique_leaf_segments.append(leaf)
+        leaf_segments = unique_leaf_segments
+
+        parent_col = hierarchy_levels[0] if hierarchy_levels else None
+        unique_parents: list[str] = []
+        if parent_col:
+            unique_parents = sorted(list({leaf.get(parent_col, "") for leaf in leaf_segments if leaf.get(parent_col)}))
+
+        total_steps = len(leaf_segments) + (len(unique_parents) if len(hierarchy_levels) > 1 else 0)
         job.entity_progress_total = max(1, total_steps)
         job.entity_progress_completed = 0
 
         target_months = [str(d)[:7] for d in forecast_dates]
-        entity_results_map: dict[tuple[str, str], dict[str, Any]] = {}
+        leaf_results: list[dict[str, Any]] = []
 
-        # ── 1. Train candidate models for each Legal Entity ─────────────
-        for bu, ent in entity_segments:
-            job.entity_current_segment = f"{bu} • Entity {ent}"
+        # ── 5. Train candidate models for each leaf segment ─────────
+        for seg in leaf_segments:
+            label = " • ".join(str(v) for v in seg.values())
+            job.entity_current_segment = label
             try:
-                # Build series for this single entity
                 seg_res = series_builder.build_aggregate_series(
                     long_df=long_df,
-                    filters=request.filters,
+                    filters=request.filters or {},
                     dimension_columns=dimension_columns,
                     frequency=frequency,
-                    bu_entities={bu: [ent]},
-                    accounts=request.accounts,
+                    hierarchy_selections=[seg],
+                    target_column=target_col,
+                    target_value=target_val,
                     train_start=request.train_start,
                     train_end=request.train_end,
                 )
                 seg_ts = seg_res.total_series
                 n_seg_obs = len(seg_ts)
 
-                if n_seg_obs < 13:
+                if n_seg_obs < 3:
+                    mean_val = float(np.nanmean(seg_ts.values())) if len(seg_ts) > 0 and not np.isnan(np.nanmean(seg_ts.values())) else 0.0
+                    final_fc = {m: round(mean_val, 2) for m in target_months}
+                    leaf_results.append({
+                        "dims": seg,
+                        "label": label,
+                        "best_model": "NaiveMean",
+                        "mape": None,
+                        "forecast": final_fc,
+                    })
+                elif n_seg_obs < 13:
                     from darts.models import NaiveMean
                     with _warnings.catch_warnings():
                         _warnings.simplefilter("ignore")
@@ -470,47 +586,71 @@ def _run_entity_training(
                         fc_ts = base_model.predict(request.forecast_horizon)
                         fc_pts = extract_series_points(fc_ts)
                         fc_map = {p["date"][:7]: float(p["value"] or 0.0) for p in fc_pts}
-                    entity_results_map[(bu, ent)] = {
+                        fc_vals = [float(p["value"] or 0.0) for p in fc_pts]
+                        final_fc = {}
+                        for idx, m in enumerate(target_months):
+                            if m in fc_map:
+                                final_fc[m] = round(fc_map[m], 2)
+                            elif idx < len(fc_vals):
+                                final_fc[m] = round(fc_vals[idx], 2)
+                            else:
+                                final_fc[m] = round(fc_vals[-1], 2) if fc_vals else 0.0
+                    leaf_results.append({
+                        "dims": seg,
+                        "label": label,
                         "best_model": "NaiveMean",
                         "mape": None,
-                        "forecast": {m: fc_map.get(m, 0.0) for m in target_months},
-                    }
+                        "forecast": final_fc,
+                    })
                 else:
                     val_size = max(1, min(6, int(n_seg_obs * 0.25)))
                     seg_train_ts = seg_ts[:-val_size]
                     seg_val_ts = seg_ts[-val_size:]
-
-                    eligible_candidates = model_registry.filter_eligible_models(
+                    eligible = model_registry.filter_eligible_models(
                         request.candidate_models,
                         n_train_observations=len(seg_train_ts),
                     )
-                    if not eligible_candidates:
-                        from darts.models import NaiveMean
-                        with _warnings.catch_warnings():
-                            _warnings.simplefilter("ignore")
-                            base_model = NaiveMean()
-                            base_model.fit(seg_ts)
-                            fc_ts = base_model.predict(request.forecast_horizon)
-                            fc_pts = extract_series_points(fc_ts)
-                            fc_map = {p["date"][:7]: float(p["value"] or 0.0) for p in fc_pts}
-                        entity_results_map[(bu, ent)] = {
+                    if not eligible:
+                        if n_seg_obs < 3:
+                            mean_val = float(np.nanmean(seg_ts.values())) if len(seg_ts) > 0 and not np.isnan(np.nanmean(seg_ts.values())) else 0.0
+                            final_fc = {m: round(mean_val, 2) for m in target_months}
+                        else:
+                            from darts.models import NaiveMean
+                            with _warnings.catch_warnings():
+                                _warnings.simplefilter("ignore")
+                                base_model = NaiveMean()
+                                base_model.fit(seg_ts)
+                                fc_ts = base_model.predict(request.forecast_horizon)
+                                fc_pts = extract_series_points(fc_ts)
+                                fc_map = {p["date"][:7]: float(p["value"] or 0.0) for p in fc_pts}
+                                fc_vals = [float(p["value"] or 0.0) for p in fc_pts]
+                                final_fc = {}
+                                for idx, m in enumerate(target_months):
+                                    if m in fc_map:
+                                        final_fc[m] = round(fc_map[m], 2)
+                                    elif idx < len(fc_vals):
+                                        final_fc[m] = round(fc_vals[idx], 2)
+                                    else:
+                                        final_fc[m] = round(fc_vals[-1], 2) if fc_vals else 0.0
+                        leaf_results.append({
+                            "dims": seg,
+                            "label": label,
                             "best_model": "NaiveMean",
                             "mape": None,
-                            "forecast": {m: fc_map.get(m, 0.0) for m in target_months},
-                        }
+                            "forecast": final_fc,
+                        })
                     else:
                         with _warnings.catch_warnings():
                             _warnings.simplefilter("ignore")
                             c_res = model_training.evaluate_candidates(
-                                model_names=eligible_candidates,
+                                model_names=eligible,
                                 train_series=seg_train_ts,
                                 validation_series=seg_val_ts,
                             )
                         best_cand = model_training.select_best(c_res)
-                        best_model_name = best_cand.model_name if best_cand else eligible_candidates[0]
+                        best_model_name = best_cand.model_name if best_cand else eligible[0]
                         best_mape = round(best_cand.mape, 2) if (best_cand and best_cand.mape is not None) else None
 
-                        # Forecast with best model
                         with _warnings.catch_warnings():
                             _warnings.simplefilter("ignore")
                             fc_res = generate_forecast(
@@ -519,160 +659,206 @@ def _run_entity_training(
                                 horizon=request.forecast_horizon,
                             )
                             fc_map = {str(d)[:7]: float(v or 0.0) for d, v in zip(fc_res.dates, fc_res.values)}
+                            fc_vals = [float(v or 0.0) for v in fc_res.values]
+                            final_fc = {}
+                            for idx, m in enumerate(target_months):
+                                if m in fc_map:
+                                    final_fc[m] = round(fc_map[m], 2)
+                                elif idx < len(fc_vals):
+                                    final_fc[m] = round(fc_vals[idx], 2)
+                                else:
+                                    final_fc[m] = round(fc_vals[-1], 2) if fc_vals else 0.0
 
-                        entity_results_map[(bu, ent)] = {
+                        leaf_results.append({
+                            "dims": seg,
+                            "label": label,
                             "best_model": best_model_name,
                             "mape": best_mape,
-                            "forecast": {m: fc_map.get(m, 0.0) for m in target_months},
-                        }
-            except Exception:
-                # Fallback on all zero if no data or series build fails
-                entity_results_map[(bu, ent)] = {
+                            "forecast": final_fc,
+                        })
+            except Exception as exc:
+                job.log(f"Segment '{label}' notice: {exc}")
+                leaf_results.append({
+                    "dims": seg,
+                    "label": label,
                     "best_model": "ConstantZero",
                     "mape": None,
                     "forecast": {m: 0.0 for m in target_months},
-                }
-
-            job.entity_progress_completed += 1
-
-        # ── 2. Train / evaluate candidate models for each Business Unit ─
-        bu_best_models: dict[str, dict[str, Any]] = {}
-        for bu in unique_bus:
-            job.entity_current_segment = f"Business Unit {bu}"
-            ents = bu_entities.get(bu, [])
-            try:
-                bu_seg_res = series_builder.build_aggregate_series(
-                    long_df=long_df,
-                    filters=request.filters,
-                    dimension_columns=dimension_columns,
-                    frequency=frequency,
-                    bu_entities={bu: ents} if ents else None,
-                    accounts=request.accounts,
-                    train_start=request.train_start,
-                    train_end=request.train_end,
-                )
-                bu_ts = bu_seg_res.total_series
-                n_bu_obs = len(bu_ts)
-                if n_bu_obs >= 13:
-                    val_size = max(1, min(6, int(n_bu_obs * 0.25)))
-                    bu_train_ts = bu_ts[:-val_size]
-                    bu_val_ts = bu_ts[-val_size:]
-                    eligible = model_registry.filter_eligible_models(
-                        request.candidate_models,
-                        n_train_observations=len(bu_train_ts),
-                    )
-                    if eligible:
-                        with _warnings.catch_warnings():
-                            _warnings.simplefilter("ignore")
-                            c_res = model_training.evaluate_candidates(
-                                model_names=eligible,
-                                train_series=bu_train_ts,
-                                validation_series=bu_val_ts,
-                            )
-                        best_cand = model_training.select_best(c_res)
-                        bu_best_models[bu] = {
-                            "best_model": best_cand.model_name if best_cand else eligible[0],
-                            "mape": round(best_cand.mape, 2) if (best_cand and best_cand.mape is not None) else None,
-                        }
-                    else:
-                        bu_best_models[bu] = {"best_model": "NaiveMean", "mape": None}
-                else:
-                    bu_best_models[bu] = {"best_model": "NaiveMean", "mape": None}
-            except Exception:
-                bu_best_models[bu] = {"best_model": "NaiveMean", "mape": None}
-
-            job.entity_progress_completed += 1
-
-        # ── 3. Assemble Monthly Hierarchy & Percentage Distribution ────
-        hierarchy: list[dict[str, Any]] = []
-        for m in target_months:
-            # Calculate BU forecasts (sum of its entities)
-            bu_forecast_totals: dict[str, float] = {}
-            for bu in unique_bus:
-                ents = bu_entities.get(bu, [])
-                bu_total_m = sum(entity_results_map.get((bu, ent), {}).get("forecast", {}).get(m, 0.0) for ent in ents)
-                bu_forecast_totals[bu] = bu_total_m
-
-            # Month total is sum of all BUs
-            month_total = sum(bu_forecast_totals.values())
-
-            bu_list: list[dict[str, Any]] = []
-            for bu in unique_bus:
-                bu_val = bu_forecast_totals[bu]
-                bu_pct = (bu_val / month_total * 100.0) if abs(month_total) > 1e-6 else 0.0
-
-                ents = bu_entities.get(bu, [])
-                ent_list: list[dict[str, Any]] = []
-                for ent in ents:
-                    ent_info = entity_results_map.get((bu, ent), {})
-                    ent_val = ent_info.get("forecast", {}).get(m, 0.0)
-                    ent_pct = (ent_val / month_total * 100.0) if abs(month_total) > 1e-6 else 0.0
-                    ent_list.append({
-                        "entity": ent,
-                        "forecast": round(ent_val, 2),
-                        "distribution_pct": round(ent_pct, 2),
-                        "best_model": ent_info.get("best_model", "NaiveSeasonal"),
-                        "mape": ent_info.get("mape"),
-                    })
-
-                bu_info = bu_best_models.get(bu, {"best_model": "NaiveSeasonal", "mape": None})
-                bu_list.append({
-                    "business_unit": bu,
-                    "forecast": round(bu_val, 2),
-                    "distribution_pct": round(bu_pct, 2),
-                    "best_model": bu_info.get("best_model", "NaiveSeasonal"),
-                    "mape": bu_info.get("mape"),
-                    "entities": ent_list,
                 })
 
-            hierarchy.append({
-                "month": m,
-                "total_forecast": round(month_total, 2),
-                "distribution_pct": 100.0,
-                "business_units": bu_list,
-            })
+            job.entity_progress_completed += 1
 
-        # Resolve target account and description for Story-style reporting
-        target_account = request.accounts[0] if request.accounts else "Target"
-        desc_col = next((c for c in dimension_columns if "description" in c.lower()), None)
-        target_desc = target_account
-        if desc_col and desc_col in long_df.columns:
-            acc_col = next((c for c in dimension_columns if c.lower() == "account"), "ACCOUNT")
-            if acc_col in long_df.columns:
-                matches = long_df[long_df[acc_col] == target_account][desc_col].dropna()
-                if not matches.empty:
-                    target_desc = str(matches.iloc[0])
+        # ── 6. Parent evaluations (if multi-level) ───────────────────
+        parent_best_models: dict[str, dict[str, Any]] = {}
+        if len(hierarchy_levels) > 1 and parent_col:
+            for p in unique_parents:
+                job.entity_current_segment = f"{parent_col} {p}"
+                try:
+                    p_seg_res = series_builder.build_aggregate_series(
+                        long_df=long_df,
+                        filters=request.filters or {},
+                        dimension_columns=dimension_columns,
+                        frequency=frequency,
+                        hierarchy_selections=[{parent_col: p}],
+                        target_column=target_col,
+                        target_value=target_val,
+                        train_start=request.train_start,
+                        train_end=request.train_end,
+                    )
+                    p_ts = p_seg_res.total_series
+                    n_p_obs = len(p_ts)
+                    if n_p_obs >= 13:
+                        val_size = max(1, min(6, int(n_p_obs * 0.25)))
+                        p_train_ts = p_ts[:-val_size]
+                        p_val_ts = p_ts[-val_size:]
+                        eligible = model_registry.filter_eligible_models(
+                            request.candidate_models,
+                            n_train_observations=len(p_train_ts),
+                        )
+                        if eligible:
+                            with _warnings.catch_warnings():
+                                _warnings.simplefilter("ignore")
+                                c_res = model_training.evaluate_candidates(
+                                    model_names=eligible,
+                                    train_series=p_train_ts,
+                                    validation_series=p_val_ts,
+                                )
+                            best_cand = model_training.select_best(c_res)
+                            parent_best_models[p] = {
+                                "best_model": best_cand.model_name if best_cand else eligible[0],
+                                "mape": round(best_cand.mape, 2) if (best_cand and best_cand.mape is not None) else None,
+                            }
+                        else:
+                            parent_best_models[p] = {"best_model": "NaiveMean", "mape": None}
+                    else:
+                        parent_best_models[p] = {"best_model": "NaiveMean", "mape": None}
+                except Exception:
+                    parent_best_models[p] = {"best_model": "NaiveMean", "mape": None}
 
-        entity_forecasts_list = [
-            {
-                "business_unit": bu,
-                "entity": ent,
-                "account": target_account,
+                job.entity_progress_completed += 1
+
+        # ── 7. Monthly Hierarchy & Percentage Distribution ───────────
+        hierarchy: list[dict[str, Any]] = []
+        for m in target_months:
+            month_total = sum(leaf["forecast"].get(m, 0.0) for leaf in leaf_results)
+
+            if len(hierarchy_levels) > 1 and parent_col:
+                parent_list: list[dict[str, Any]] = []
+                for p in unique_parents:
+                    p_leaves = [l for l in leaf_results if l["dims"].get(parent_col) == p]
+                    p_val = sum(l["forecast"].get(m, 0.0) for l in p_leaves)
+                    p_pct = (p_val / month_total * 100.0) if abs(month_total) > 1e-6 else 0.0
+
+                    ent_list: list[dict[str, Any]] = []
+                    child_col = hierarchy_levels[1]
+                    for l in p_leaves:
+                        l_val = l["forecast"].get(m, 0.0)
+                        l_pct = (l_val / month_total * 100.0) if abs(month_total) > 1e-6 else 0.0
+                        ent_list.append({
+                            "entity": l["dims"].get(child_col, l["label"]),
+                            "name": l["label"],
+                            "dims": l["dims"],
+                            "forecast": round(l_val, 2),
+                            "distribution_pct": round(l_pct, 2),
+                            "best_model": l["best_model"],
+                            "mape": l["mape"],
+                        })
+
+                    p_info = parent_best_models.get(p, {"best_model": "NaiveSeasonal", "mape": None})
+                    parent_list.append({
+                        "business_unit": p,
+                        "name": p,
+                        "level_name": parent_col,
+                        "forecast": round(p_val, 2),
+                        "distribution_pct": round(p_pct, 2),
+                        "best_model": p_info.get("best_model", "NaiveSeasonal"),
+                        "mape": p_info.get("mape"),
+                        "entities": ent_list,
+                    })
+
+                hierarchy.append({
+                    "month": m,
+                    "total_forecast": round(month_total, 2),
+                    "distribution_pct": 100.0,
+                    "hierarchy_levels": hierarchy_levels,
+                    "business_units": parent_list,
+                })
+            else:
+                single_list: list[dict[str, Any]] = []
+                for l in leaf_results:
+                    l_val = l["forecast"].get(m, 0.0)
+                    l_pct = (l_val / month_total * 100.0) if abs(month_total) > 1e-6 else 0.0
+                    name = l["dims"].get(hierarchy_levels[0], l["label"]) if hierarchy_levels else l["label"]
+                    single_list.append({
+                        "business_unit": name,
+                        "name": name,
+                        "level_name": hierarchy_levels[0] if hierarchy_levels else "Segment",
+                        "forecast": round(l_val, 2),
+                        "distribution_pct": round(l_pct, 2),
+                        "best_model": l["best_model"],
+                        "mape": l["mape"],
+                        "entities": [{
+                            "entity": name,
+                            "name": name,
+                            "dims": l["dims"],
+                            "forecast": round(l_val, 2),
+                            "distribution_pct": round(l_pct, 2),
+                            "best_model": l["best_model"],
+                            "mape": l["mape"],
+                        }],
+                    })
+
+                hierarchy.append({
+                    "month": m,
+                    "total_forecast": round(month_total, 2),
+                    "distribution_pct": 100.0,
+                    "hierarchy_levels": hierarchy_levels,
+                    "business_units": single_list,
+                })
+
+        # ── 8. Assemble Segment Forecasts List ────────────────────────
+        segment_forecasts_list = []
+        for l in leaf_results:
+            bu_val = l["dims"].get("Business unit") or (l["dims"].get(hierarchy_levels[0]) if hierarchy_levels else "")
+            ent_val = l["dims"].get("SAC_Legal_Entity") or (l["dims"].get(hierarchy_levels[1]) if len(hierarchy_levels) > 1 else bu_val)
+            segment_forecasts_list.append({
+                "business_unit": bu_val,
+                "entity": ent_val,
+                "dims": l["dims"],
+                "account": target_val,
                 "description": target_desc,
-                "forecast": entity_results_map.get((bu, ent), {}).get("forecast", {}),
-                "best_model": entity_results_map.get((bu, ent), {}).get("best_model", ""),
-            }
-            for (bu, ent) in entity_segments
-        ]
+                "target_account": target_val,
+                "target_description": target_desc,
+                "forecast": l["forecast"],
+                "best_model": l["best_model"],
+                "mape": l["mape"],
+            })
 
         job.entity_results = json_safe({
             "months": target_months,
-            "hierarchy": hierarchy,
-            "entity_forecasts": entity_forecasts_list,
-            "target_account": target_account,
+            "hierarchy_levels": hierarchy_levels,
+            "target_column": target_col,
+            "description_column": desc_col,
+            "target_account": target_val,
             "target_description": target_desc,
-            "total_segments": len(entity_segments),
-            "total_business_units": len(unique_bus),
+            "hierarchy": hierarchy,
+            "entity_forecasts": segment_forecasts_list,
+            "segment_forecasts": segment_forecasts_list,
+            "total_segments": len(leaf_results),
+            "total_business_units": len(unique_parents) if len(hierarchy_levels) > 1 else len(leaf_results),
         })
         job.entity_status = "completed"
-        job.log(f"Entity-wise background training completed ({len(entity_segments)} entities across {len(unique_bus)} BUs).")
+        job.log(f"Segment-wise background training completed ({len(leaf_results)} segments across {len(hierarchy_levels)} hierarchy levels).")
 
     except Exception as exc:
         import traceback
         job.entity_status = "failed"
         job.entity_error = str(exc)
-        job.log(f"Entity training failed: {exc}")
+        job.log(f"Segment training failed: {exc}")
         traceback.print_exc()
+
+
+_run_entity_training = _run_segment_training
 
 
 def submit_job(
@@ -680,6 +866,7 @@ def submit_job(
     long_df: pd.DataFrame,
     dimension_columns: list[str],
     frequency: str,
+    schema_config: dict[str, Any] | None = None,
 ) -> str:
     """
     Create a new training job, start it in a background thread, and return the job_id.
@@ -692,7 +879,7 @@ def submit_job(
 
     thread = threading.Thread(
         target=_run_training,
-        args=(job, request, long_df, dimension_columns, frequency),
+        args=(job, request, long_df, dimension_columns, frequency, schema_config),
         daemon=True,
         name=f"training-{job_id[:8]}",
     )

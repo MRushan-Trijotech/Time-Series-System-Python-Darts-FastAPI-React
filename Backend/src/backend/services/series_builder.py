@@ -26,53 +26,71 @@ MIN_OBSERVATIONS = 24  # minimum for ML models with lags=12
 
 def build_aggregate_series(
     long_df: pd.DataFrame,
-    filters: dict[str, list[str]],
-    dimension_columns: list[str],
+    filters: dict[str, list[str]] | None = None,
+    dimension_columns: list[str] | None = None,
     frequency: str = "MS",
     bu_entities: dict[str, list[str]] | None = None,
     accounts: list[str] | None = None,
     train_start: str | None = None,
     train_end: str | None = None,
+    hierarchy_selections: list[dict[str, str]] | None = None,
+    target_column: str | None = None,
+    target_value: str | None = None,
 ) -> SeriesBuildResult:
     """
     Apply filters to long_df, aggregate values by date (sum),
-    and build a monthly Darts TimeSeries.
-
-    Parameters
-    ----------
-    long_df : long-format DataFrame with columns [date, *dim_cols, value]
-    filters : dict of dim_name -> list of allowed values (empty list = all)
-    dimension_columns : the detected dimension column names
-    frequency : pandas frequency string (default "MS" = month-start)
-    bu_entities : dict of Business unit -> list of selected legal entities for that BU
-    accounts : list of selected ACCOUNT codes
-    train_start : optional ISO date string to restrict series start (fills missing with 0)
-    train_end : optional ISO date string to restrict series end (fills missing with 0)
+    and build a monthly Darts TimeSeries. Supports dynamic multi-level hierarchies
+    and target columns as well as legacy BU/Entity/Account mappings.
     """
     warnings: list[str] = []
     df = long_df.copy()
+    filters = filters or {}
+    dimension_columns = dimension_columns or []
 
-    # Case-insensitive column resolution
+    # 1. Dynamic Target column filtering (do first to instantly shrink row count)
+    if target_column and target_value and target_column in df.columns:
+        df = df[df[target_column].astype(str) == str(target_value)]
+
+    # 2. Fast vectorized multi-level hierarchy filter
+    if hierarchy_selections:
+        sel_df = pd.DataFrame(hierarchy_selections).dropna(how="all")
+        valid_cols = [c for c in sel_df.columns if c in df.columns]
+        if valid_cols:
+            sel_df = sel_df[valid_cols].drop_duplicates()
+            if len(valid_cols) == 1:
+                col = valid_cols[0]
+                allowed_vals = set(sel_df[col].astype(str))
+                df = df[df[col].astype(str).isin(allowed_vals)]
+            else:
+                for c in valid_cols:
+                    sel_df[c] = sel_df[c].astype(str)
+                    df[c] = df[c].astype(str)
+                df = df.merge(sel_df, on=valid_cols, how="inner")
+
+    # Case-insensitive column resolution for legacy calls
     bu_col = next((c for c in dimension_columns if "business unit" in c.lower()), None)
     ent_col = next((c for c in dimension_columns if "legal_entity" in c.lower() or "legal entity" in c.lower()), None)
     acc_col = next((c for c in dimension_columns if c.lower() == "account"), None)
 
-    # 1. Apply exact hierarchical BU + Legal Entity matching if provided
-    if bu_entities and bu_col and ent_col and bu_col in df.columns and ent_col in df.columns:
-        masks = []
+    # 3. Apply exact hierarchical BU + Legal Entity matching if provided (legacy)
+    if not hierarchy_selections and bu_entities and bu_col and ent_col and bu_col in df.columns and ent_col in df.columns:
+        bu_ent_pairs = []
         for bu, entities in bu_entities.items():
             if entities:
-                masks.append((df[bu_col] == bu) & (df[ent_col].isin(entities)))
+                for ent in entities:
+                    bu_ent_pairs.append({bu_col: str(bu), ent_col: str(ent)})
             else:
-                masks.append(df[bu_col] == bu)
-        if masks:
-            comb = masks[0]
-            for m in masks[1:]:
-                comb = comb | m
-            df = df[comb]
+                bu_ent_pairs.append({bu_col: str(bu)})
+        if bu_ent_pairs:
+            p_df = pd.DataFrame(bu_ent_pairs).drop_duplicates()
+            if ent_col in p_df.columns and not p_df[ent_col].isna().all():
+                df = df.merge(p_df, on=[bu_col, ent_col], how="inner")
+            else:
+                df = df[df[bu_col].astype(str).isin(set(p_df[bu_col]))]
 
-    # 2. Apply 1-to-1 Account filtering if provided
-    if accounts and acc_col and acc_col in df.columns:
+    # 4. Apply 1-to-1 Account filtering if provided (legacy)
+    if not target_value and accounts and acc_col and acc_col in df.columns:
+        df = df[df[acc_col].isin(accounts)]
         df = df[df[acc_col].isin(accounts)]
 
     # 3. Apply any other standard dimension filters
@@ -111,9 +129,10 @@ def build_aggregate_series(
 
     first_avail = valid_points["date"].min()
     last_avail = valid_points["date"].max()
+    dataset_end = long_df["date"].max() if "date" in long_df.columns and not long_df["date"].empty else last_avail
 
     eff_start = max(first_avail, pd.Timestamp(train_start)) if train_start else first_avail
-    eff_end = min(last_avail, pd.Timestamp(train_end)) if train_end else last_avail
+    eff_end = pd.Timestamp(train_end) if train_end else max(last_avail, dataset_end)
 
     if eff_start > eff_end:
         raise ValueError(
@@ -121,9 +140,16 @@ def build_aggregate_series(
             f"({first_avail.strftime('%Y-%m')} to {last_avail.strftime('%Y-%m')})."
         )
 
-    # Slice between eff_start and eff_end; fill in-between gaps with 0
-    agg = agg[(agg["date"] >= eff_start) & (agg["date"] <= eff_end)].copy()
-    agg["value"] = agg["value"].fillna(0)
+    # Reindex over the complete monthly date range between eff_start and eff_end
+    full_date_idx = pd.date_range(eff_start, eff_end, freq=frequency)
+    agg = (
+        agg.set_index("date")
+        .reindex(full_date_idx)
+        .fillna(0.0)
+        .reset_index()
+        .rename(columns={"index": "date"})
+    )
+    agg["value"] = agg["value"].fillna(0.0)
 
     # Drop rows with NaN values (Darts requires no NaN for most models)
     agg_clean = agg.dropna(subset=["value"])

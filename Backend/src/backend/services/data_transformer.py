@@ -89,11 +89,21 @@ def transform(
     ]
     data_df = data_df.iloc[:, keep_indices].copy()
     # Rename by position in keep_indices
-    new_names = [detection.columns[i].name for i in keep_indices]
-    data_df.columns = new_names
+    new_names = [c.name for c in dim_cols] + [c.name for c in period_cols]
+    seen_names: dict[str, int] = {}
+    unique_new_names = []
+    for nm in new_names:
+        s_nm = str(nm).strip() if pd.notna(nm) else "col"
+        if s_nm in seen_names:
+            seen_names[s_nm] += 1
+            unique_new_names.append(f"{s_nm}_{seen_names[s_nm]}")
+        else:
+            seen_names[s_nm] = 0
+            unique_new_names.append(s_nm)
+    data_df.columns = unique_new_names
 
-    dim_col_names = [c.name for c in dim_cols]
-    period_col_names = [c.name for c in period_cols]
+    dim_col_names = unique_new_names[:len(dim_cols)]
+    period_col_names = unique_new_names[len(dim_cols):]
 
     # Convert dimension columns to string
     for col in dim_col_names:
@@ -118,7 +128,7 @@ def transform(
 
     # Build date map: period_label -> pd.Timestamp
     date_map: dict[str, pd.Timestamp] = {
-        c.name: c.parsed_date
+        c.name: pd.Timestamp(c.parsed_date)
         for c in period_cols
         if c.parsed_date is not None
     }
@@ -182,13 +192,15 @@ def transform(
         warnings.append("Missing values interpolated (user-selected strategy).")
 
     timestamps = sorted(date_map.values())
+    d_start = pd.Timestamp(timestamps[0]) if timestamps else pd.Timestamp.now()
+    d_end = pd.Timestamp(timestamps[-1]) if timestamps else pd.Timestamp.now()
 
     return TransformResult(
         long_df=long_df,
         dimension_columns=dim_col_names,
         period_columns=period_col_names,
-        date_range_start=timestamps[0],
-        date_range_end=timestamps[-1],
+        date_range_start=d_start,
+        date_range_end=d_end,
         frequency=detection.frequency,
         row_count=len(long_df),
         missing_value_count=missing_value_count,

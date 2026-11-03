@@ -6,7 +6,7 @@ import { ConfigurationPage } from './pages/ConfigurationPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { ExplanationReportPage } from './pages/ExplanationReportPage'
 import { ForecastReportPage } from './pages/ForecastReportPage'
-import { EntityWiseReportPage } from './pages/EntityWiseReportPage'
+import { SegmentWiseReportPage } from './pages/SegmentWiseReportPage'
 import { TrainingPage } from './pages/TrainingPage'
 import { UploadPage } from './pages/UploadPage'
 
@@ -22,7 +22,8 @@ export const App: React.FC = () => {
             <Route path="/training" element={<TrainingPage />} />
             <Route path="/report/forecast" element={<ForecastReportPage />} />
             <Route path="/report/explanation" element={<ExplanationReportPage />} />
-            <Route path="/report/entity-wise" element={<EntityWiseReportPage />} />
+            <Route path="/report/segment-wise" element={<SegmentWiseReportPage />} />
+            <Route path="/report/entity-wise" element={<SegmentWiseReportPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

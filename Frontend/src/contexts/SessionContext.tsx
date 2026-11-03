@@ -2,6 +2,9 @@ import React, { createContext, useContext, useState } from 'react'
 import type { TransformResponse } from '../types'
 
 export interface ForecastConfigState {
+  hierarchyLevels?: string[]
+  hierarchySelections?: Record<string, string[]>
+  targetColumn?: string
   businessUnits: string[]
   buEntities: Record<string, string[]>
   targetAccount: string | null

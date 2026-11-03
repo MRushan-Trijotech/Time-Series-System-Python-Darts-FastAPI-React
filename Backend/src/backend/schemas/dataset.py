@@ -30,8 +30,25 @@ class AccountItem(BaseModel):
     label: str
 
 
+class TargetOption(BaseModel):
+    value: str
+    description: str | None = None
+    label: str
+
+
+class HierarchyTreeNode(BaseModel):
+    value: str
+    children: list["HierarchyTreeNode"] = []
+
+
 class DimensionsResponse(BaseModel):
     dimensions: list[DimensionValues]
+    hierarchy_levels: list[str] = []
+    hierarchy_tree: list[dict[str, Any]] = []  # Nested tree of hierarchy nodes
+    target_column: str = "ACCOUNT"
+    description_column: str | None = "Description"
+    targets: list[TargetOption] = []
+    # Legacy backward-compatibility fields:
     bu_entity_hierarchy: dict[str, list[str]] = {}
     accounts: list[AccountItem] = []
     relations: list[dict[str, str]] = []
@@ -53,6 +70,8 @@ class SeriesPreviewResponse(BaseModel):
 
 class SeriesInfoRequest(BaseModel):
     filters: dict[str, list[str]] = {}
+    hierarchy_selections: list[dict[str, str]] | None = None
+    target_value: str | None = None
     bu_entities: dict[str, list[str]] | None = None
     accounts: list[str] | None = None
 

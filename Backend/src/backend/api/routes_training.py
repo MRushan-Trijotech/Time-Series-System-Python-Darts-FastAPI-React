@@ -43,6 +43,7 @@ async def create_training_job(req: TrainingRequest):
         long_df=res.long_df,
         dimension_columns=res.dimension_columns,
         frequency=res.frequency,
+        schema_config=record.schema_config,
     )
 
     return {

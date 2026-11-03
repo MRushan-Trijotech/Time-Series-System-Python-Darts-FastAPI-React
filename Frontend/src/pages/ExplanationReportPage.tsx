@@ -6,11 +6,10 @@ import {
   BarChart2,
   Loader2,
   Shield,
-  Building2,
-  Briefcase,
   Target,
   Calendar,
   Clock,
+  Layers,
 } from 'lucide-react'
 import {
   Bar,
@@ -60,15 +59,21 @@ export const ExplanationReportPage: React.FC = () => {
   const activeConfig = useMemo(() => {
     if (forecastConfig) return forecastConfig
     if (report?.configuration) {
+      const cfg = report.configuration
       return {
-        businessUnits: report.configuration.business_units || [],
-        buEntities: report.configuration.bu_entities || {},
-        targetAccount: report.configuration.accounts?.[0] || null,
-        targetLabel: report.configuration.accounts?.[0] || 'Target Account',
-        trainStart: report.configuration.train_start || '',
-        trainEnd: report.configuration.train_end || '',
-        forecastHorizon: report.configuration.forecast_horizon || 12,
-        totalObservations: report.configuration.total_observations,
+        hierarchyLevels: cfg.hierarchy_levels || (cfg.business_units?.length ? ['Business unit', 'SAC_Legal_Entity'] : []),
+        hierarchySelections: cfg.hierarchy_summary || {},
+        targetColumn: cfg.target_column || 'Target',
+        businessUnits: cfg.business_units || [],
+        buEntities: cfg.bu_entities || {},
+        targetAccount: cfg.target_value || cfg.accounts?.[0] || null,
+        targetLabel: cfg.target_description
+          ? `${cfg.target_description} (${cfg.target_value || cfg.accounts?.[0]})`
+          : cfg.target_value || cfg.accounts?.[0] || 'Target Account',
+        trainStart: cfg.train_start || '',
+        trainEnd: cfg.train_end || '',
+        forecastHorizon: cfg.forecast_horizon || 12,
+        totalObservations: cfg.total_observations,
       }
     }
     return null
@@ -120,18 +125,7 @@ export const ExplanationReportPage: React.FC = () => {
     .filter((pt) => pt.date.endsWith('-01'))
     .map((pt) => pt.date)
 
-  const entitiesSummary = () => {
-    if (!activeConfig?.buEntities || Object.keys(activeConfig.buEntities).length === 0) {
-      return 'All Legal Entities'
-    }
-    const allEnts: string[] = []
-    Object.entries(activeConfig.buEntities).forEach(([bu, ents]) => {
-      if (ents && ents.length > 0) {
-        ents.forEach((e) => allEnts.push(`${bu}:${e}`))
-      }
-    })
-    return allEnts.length > 0 ? allEnts.join(', ') : 'All Legal Entities'
-  }
+
 
   return (
     <div className="space-y-6">
@@ -156,35 +150,50 @@ export const ExplanationReportPage: React.FC = () => {
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4 pt-1">
-          <div className="space-y-1">
-            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-              <Building2 className="w-3 h-3 text-blue-500" />
-              Business Unit(s)
-            </span>
-            <p className="text-xs font-bold text-slate-800 truncate" title={activeConfig?.businessUnits?.join(', ') || 'All'}>
-              {activeConfig?.businessUnits && activeConfig.businessUnits.length > 0
-                ? activeConfig.businessUnits.join(', ')
-                : 'All Business Units'}
-            </p>
-          </div>
+          {/* Dynamic Hierarchy Levels */}
+          {activeConfig?.hierarchyLevels && activeConfig.hierarchyLevels.length > 0 ? (
+            activeConfig.hierarchyLevels.map((lvl) => {
+              const selected = activeConfig.hierarchySelections?.[lvl] || []
+              const displayVal =
+                selected.length > 0
+                  ? selected.length > 2
+                    ? `${selected.slice(0, 2).join(', ')} (+${selected.length - 2})`
+                    : selected.join(', ')
+                  : `All ${lvl}`
+              const fullVal = selected.length > 0 ? selected.join(', ') : `All ${lvl}`
 
-          <div className="space-y-1">
-            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-              <Briefcase className="w-3 h-3 text-blue-500" />
-              Legal Entities
-            </span>
-            <p className="text-xs font-bold text-slate-800 truncate" title={entitiesSummary()}>
-              {entitiesSummary()}
-            </p>
-          </div>
+              return (
+                <div key={lvl} className="space-y-1">
+                  <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                    <Layers className="w-3 h-3 text-blue-500" />
+                    {lvl}
+                  </span>
+                  <p className="text-xs font-bold text-slate-800 truncate" title={fullVal}>
+                    {displayVal}
+                  </p>
+                </div>
+              )
+            })
+          ) : (
+            <div className="space-y-1">
+              <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                <Layers className="w-3 h-3 text-blue-500" />
+                Hierarchy Segments
+              </span>
+              <p className="text-xs font-bold text-slate-800 truncate">
+                All Records
+              </p>
+            </div>
+          )}
 
+          {/* Forecasting Target */}
           <div className="space-y-1">
             <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
               <Target className="w-3 h-3 text-emerald-500" />
-              Target Account
+              Target ({activeConfig?.targetColumn || 'Account'})
             </span>
             <p className="text-xs font-bold text-emerald-700 truncate" title={activeConfig?.targetLabel || activeConfig?.targetAccount || 'Target'}>
-              {activeConfig?.targetLabel || activeConfig?.targetAccount || 'Sales Revenue (PL01)'}
+              {activeConfig?.targetLabel || activeConfig?.targetAccount || '—'}
             </p>
           </div>
 

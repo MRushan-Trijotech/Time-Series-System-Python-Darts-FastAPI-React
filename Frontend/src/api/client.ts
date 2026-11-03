@@ -9,6 +9,9 @@ import type {
   TransformResponse,
   UploadResponse,
   EntityWiseReportResponse,
+  SegmentWiseReportResponse,
+  SchemaMappingConfig,
+  MultiUploadResponse,
 } from '../types'
 
 // Resolve API base URL: prioritize environment variable (for Render production)
@@ -33,6 +36,26 @@ export const uploadFile = async (file: File): Promise<UploadResponse> => {
   return res.data
 }
 
+export const uploadMultipleFiles = async (files: File[]): Promise<MultiUploadResponse> => {
+  const formData = new FormData()
+  files.forEach((f) => formData.append('files', f))
+  const res = await api.post<MultiUploadResponse>('/upload-multiple', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return res.data
+}
+
+export const mergeTransformDatasets = async (
+  datasetIds: string[],
+  schemaConfig?: SchemaMappingConfig
+): Promise<TransformResponse> => {
+  const res = await api.post<TransformResponse>('/datasets/merge-transform', {
+    dataset_ids: datasetIds,
+    schema_config: schemaConfig,
+  })
+  return res.data
+}
+
 export const inspectDataset = async (datasetId: string, sheetName: string): Promise<HeaderDetectionResult> => {
   const res = await api.post<HeaderDetectionResult>(`/datasets/${datasetId}/inspect`, {
     sheet_name: sheetName,
@@ -47,6 +70,7 @@ export const transformDataset = async (
     header_depth?: number
     dimension_column_indices?: number[]
     period_column_indices?: number[]
+    schema_config?: SchemaMappingConfig
   }
 ): Promise<TransformResponse> => {
   const res = await api.post<TransformResponse>(`/datasets/${datasetId}/transform`, {
@@ -72,6 +96,8 @@ export const getSeriesInfo = async (
     bu_entities?: Record<string, string[]>
     accounts?: string[]
     filters?: Record<string, string[]>
+    hierarchy_selections?: Record<string, string>[]
+    target_value?: string
   }
 ): Promise<{
   n_observations: number
@@ -84,6 +110,8 @@ export const getSeriesInfo = async (
     bu_entities: params.bu_entities,
     accounts: params.accounts,
     filters: params.filters || {},
+    hierarchy_selections: params.hierarchy_selections,
+    target_value: params.target_value,
   })
   return res.data
 }
@@ -93,6 +121,8 @@ export const startTraining = async (params: {
   filters?: Record<string, string[]>
   bu_entities?: Record<string, string[]>
   accounts?: string[]
+  hierarchy_selections?: Record<string, string>[]
+  target_value?: string
   forecast_horizon: number
   validation_split?: number
   candidate_models?: string[]
@@ -118,8 +148,12 @@ export const getExplanationReport = async (jobId: string): Promise<ExplanationRe
   return res.data
 }
 
-export const getEntityWiseReport = async (jobId: string): Promise<EntityWiseReportResponse> => {
-  const res = await api.get<EntityWiseReportResponse>(`/reports/${jobId}/entity-wise`)
+export const getSegmentWiseReport = async (jobId: string): Promise<SegmentWiseReportResponse> => {
+  const res = await api.get<SegmentWiseReportResponse>(`/reports/${jobId}/segment-wise`)
   return res.data
+}
+
+export const getEntityWiseReport = async (jobId: string): Promise<EntityWiseReportResponse> => {
+  return getSegmentWiseReport(jobId)
 }
 

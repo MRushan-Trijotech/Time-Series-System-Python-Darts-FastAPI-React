@@ -139,8 +139,9 @@ async def export_models_csv(job_id: str):
     )
 
 
+@router.get("/reports/{job_id}/segment-wise")
 @router.get("/reports/{job_id}/entity-wise")
-async def get_entity_wise_report(job_id: str):
+async def get_segment_wise_report(job_id: str):
     job = get_job(job_id)
     if job is None:
         raise HTTPException(
@@ -168,15 +169,18 @@ async def get_entity_wise_report(job_id: str):
 
 def _build_story_export_rows(results: dict[str, Any]) -> tuple[list[str], list[str], list[list[Any]]]:
     """
-    Builds the exact Story.xlsx format:
-    Row 0: ['', '', '', 'Date', '(all)', Year, Quarter, Month, ...]
-    Row 1: ['Business unit', 'SAC_Legal_Entity', 'ACCOUNT', 'Description', '', '', ...]
-    Data Rows: [bu, entity, account, description, all_val, year_val, qtr_val, m_val, ...]
+    Builds the Story-style multi-level header report format:
+    Row 0: ['', ..., 'Date', '(all)', Year, Quarter, Month, ...]
+    Row 1: [Hierarchy1, Hierarchy2, ..., Target, Description, '', '', ...]
+    Data Rows: [h1, h2, ..., target, desc, all_val, year_val, qtr_val, m_val, ...]
     """
     import datetime
 
     months: list[str] = results.get("months", [])
-    entity_forecasts: list[dict[str, Any]] = results.get("entity_forecasts", [])
+    entity_forecasts: list[dict[str, Any]] = results.get("segment_forecasts") or results.get("entity_forecasts", [])
+    hierarchy_levels: list[str] = results.get("hierarchy_levels") or ["Business unit", "SAC_Legal_Entity"]
+    target_col = results.get("target_column") or "ACCOUNT"
+    desc_col = results.get("description_column") or "Description"
     target_account = results.get("target_account", "PL")
     target_desc = results.get("target_description", target_account)
 
@@ -192,8 +196,13 @@ def _build_story_export_rows(results: dict[str, Any]) -> tuple[list[str], list[s
             years_dict[y][q] = []
         years_dict[y][q].append((m, month_label))
 
-    row0: list[str] = ["", "", "", "Date", "(all)"]
-    row1: list[str] = ["Business unit", "SAC_Legal_Entity", "ACCOUNT", "Description", ""]
+    header_dim_cols = list(hierarchy_levels) + [target_col]
+    if desc_col and desc_col != target_col:
+        header_dim_cols.append(desc_col)
+
+    num_dim_cols = len(header_dim_cols)
+    row0: list[str] = [""] * (num_dim_cols - 1) + ["Date", "(all)"]
+    row1: list[str] = list(header_dim_cols) + [""]
     col_accessors: list[str] = ["(all)"]
 
     for y in sorted(years_dict.keys()):
@@ -230,43 +239,63 @@ def _build_story_export_rows(results: dict[str, Any]) -> tuple[list[str], list[s
 
     data_rows: list[list[Any]] = []
 
-    # Calculate Grand Total & BU forecast totals
+    # Calculate Grand Total
     grand_total_fc: dict[str, float] = {m: 0.0 for m in months}
-    bu_fcs: dict[str, dict[str, float]] = {}
-
-    for ent_item in entity_forecasts:
-        bu = ent_item.get("business_unit", "")
-        fc = ent_item.get("forecast", {})
-        if bu not in bu_fcs:
-            bu_fcs[bu] = {m: 0.0 for m in months}
+    for item in entity_forecasts:
+        fc = item.get("forecast", {})
         for m in months:
-            v = fc.get(m, 0.0)
-            bu_fcs[bu][m] += v
-            grand_total_fc[m] += v
+            grand_total_fc[m] += fc.get(m, 0.0)
 
-    # 1. Total Row (at top, matching SAC Story summary)
-    total_vals = compute_vals(grand_total_fc)
-    data_rows.append(["(all)", "(all)", target_account, f"TOTAL {target_desc}"] + total_vals)
+    # 1. Total Row
+    total_dim_vals = ["(all)"] * len(hierarchy_levels) + [target_account]
+    if desc_col and desc_col != target_col:
+        total_dim_vals.append(f"TOTAL {target_desc}")
+    data_rows.append(total_dim_vals + compute_vals(grand_total_fc))
 
-    # 2. Group by BU
-    bus_sorted = sorted(bu_fcs.keys())
-    for bu in bus_sorted:
-        bu_vals = compute_vals(bu_fcs[bu])
-        data_rows.append([bu, "(all)", target_account, f"BU {bu} Subtotal"] + bu_vals)
+    # 2. Group by hierarchy
+    if len(hierarchy_levels) > 1:
+        parent_col = hierarchy_levels[0]
+        parent_items: dict[str, list[dict[str, Any]]] = {}
+        for item in entity_forecasts:
+            dims = item.get("dims") or {}
+            p_val = dims.get(parent_col) or item.get("business_unit") or ""
+            if p_val not in parent_items:
+                parent_items[p_val] = []
+            parent_items[p_val].append(item)
 
-        # Entity rows for this BU
-        ents_in_bu = [e for e in entity_forecasts if e.get("business_unit") == bu]
-        for ent_item in ents_in_bu:
-            ent = ent_item.get("entity", "")
-            fc = ent_item.get("forecast", {})
-            ent_vals = compute_vals(fc)
-            data_rows.append([bu, ent, target_account, target_desc] + ent_vals)
+        for p_val in sorted(parent_items.keys()):
+            p_sub_fc = {m: 0.0 for m in months}
+            for item in parent_items[p_val]:
+                for m in months:
+                    p_sub_fc[m] += item.get("forecast", {}).get(m, 0.0)
+
+            sub_dims = [p_val] + ["(all)"] * (len(hierarchy_levels) - 1) + [target_account]
+            if desc_col and desc_col != target_col:
+                sub_dims.append(f"{parent_col} {p_val} Subtotal")
+            data_rows.append(sub_dims + compute_vals(p_sub_fc))
+
+            for item in parent_items[p_val]:
+                dims = item.get("dims") or {}
+                leaf_dims = [dims.get(c, "") for c in hierarchy_levels] + [target_account]
+                if desc_col and desc_col != target_col:
+                    leaf_dims.append(target_desc)
+                data_rows.append(leaf_dims + compute_vals(item.get("forecast", {})))
+    else:
+        h_col = hierarchy_levels[0] if hierarchy_levels else "Segment"
+        for item in entity_forecasts:
+            dims = item.get("dims") or {}
+            val = dims.get(h_col) or item.get("business_unit") or item.get("entity") or ""
+            leaf_dims = [val] + [target_account]
+            if desc_col and desc_col != target_col:
+                leaf_dims.append(target_desc)
+            data_rows.append(leaf_dims + compute_vals(item.get("forecast", {})))
 
     return row0, row1, data_rows
 
 
+@router.get("/reports/{job_id}/export/segment-wise.csv")
 @router.get("/reports/{job_id}/export/entity-wise.csv")
-async def export_entity_wise_csv(job_id: str):
+async def export_segment_wise_csv(job_id: str):
     job = get_job(job_id)
     if job is None:
         raise HTTPException(
@@ -277,7 +306,7 @@ async def export_entity_wise_csv(job_id: str):
     if job.entity_status != "completed" or not job.entity_results:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Entity-wise report is not completed yet (current status: '{job.entity_status}').",
+            detail=f"Segment-wise report is not completed yet (current status: '{job.entity_status}').",
         )
 
     row0, row1, data_rows = _build_story_export_rows(job.entity_results)
@@ -293,12 +322,13 @@ async def export_entity_wise_csv(job_id: str):
     return Response(
         content=csv_data.encode("utf-8"),
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f"attachment; filename=entity_wise_forecast_{job_id[:8]}.csv"},
+        headers={"Content-Disposition": f"attachment; filename=segment_wise_forecast_{job_id[:8]}.csv"},
     )
 
 
+@router.get("/reports/{job_id}/export/segment-wise.xlsx")
 @router.get("/reports/{job_id}/export/entity-wise.xlsx")
-async def export_entity_wise_xlsx(job_id: str):
+async def export_segment_wise_xlsx(job_id: str):
     job = get_job(job_id)
     if job is None:
         raise HTTPException(
@@ -309,7 +339,7 @@ async def export_entity_wise_xlsx(job_id: str):
     if job.entity_status != "completed" or not job.entity_results:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Entity-wise report is not completed yet (current status: '{job.entity_status}').",
+            detail=f"Segment-wise report is not completed yet (current status: '{job.entity_status}').",
         )
 
     import openpyxl
@@ -331,6 +361,6 @@ async def export_entity_wise_xlsx(job_id: str):
     return Response(
         content=excel_data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename=entity_wise_forecast_{job_id[:8]}.xlsx"},
+        headers={"Content-Disposition": f"attachment; filename=segment_wise_forecast_{job_id[:8]}.xlsx"},
     )
 

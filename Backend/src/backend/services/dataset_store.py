@@ -25,6 +25,7 @@ class DatasetRecord:
     raw_df: pd.DataFrame | None = None
     header_detection: HeaderDetectionResult | None = None
     transform_result: TransformResult | None = None
+    schema_config: dict[str, Any] | None = None
 
 
 _store: dict[str, DatasetRecord] = {}
@@ -47,6 +48,27 @@ def save_dataset(filename: str, file_path: Path, sheet_names: list[str]) -> Data
 def get_dataset(dataset_id: str) -> DatasetRecord | None:
     with _store_lock:
         return _store.get(dataset_id)
+
+
+def save_merged_dataset(
+    filename: str,
+    file_path: Path,
+    transform_result: TransformResult,
+    schema_config: dict[str, Any] | None = None,
+) -> DatasetRecord:
+    dataset_id = str(uuid.uuid4())
+    record = DatasetRecord(
+        dataset_id=dataset_id,
+        filename=filename,
+        file_path=file_path,
+        sheet_names=["Merged"],
+        active_sheet="Merged",
+        transform_result=transform_result,
+        schema_config=schema_config,
+    )
+    with _store_lock:
+        _store[dataset_id] = record
+    return record
 
 
 def remove_dataset(dataset_id: str) -> None:

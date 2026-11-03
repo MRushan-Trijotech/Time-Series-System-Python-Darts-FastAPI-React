@@ -87,8 +87,8 @@ export const Sidebar: React.FC = () => {
       isPending: false,
     },
     {
-      to: '/report/entity-wise',
-      label: '6. Entity-wise Report',
+      to: '/report/segment-wise',
+      label: '6. Segment-wise Report',
       icon: Layers,
       enabled: jobCompleted,
       done: entityStatus === 'completed',

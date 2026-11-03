@@ -7,8 +7,12 @@ from pydantic import BaseModel, Field, field_validator
 class TrainingRequest(BaseModel):
     dataset_id: str
     filters: dict[str, list[str]] = Field(default_factory=dict)
-    bu_entities: dict[str, list[str]] | None = None  # { "BU": ["entity1", "entity2"] }
-    accounts: list[str] | None = None  # ["PL01", ...]
+    # Selected hierarchical branch combinations: e.g. [{"Business unit": "7A", "SAC_Legal_Entity": "1700", "SAC_PRODUCT": "8A"}]
+    hierarchy_selections: list[dict[str, str]] | None = None
+    target_value: str | None = None  # Selected target code/ID (e.g. "PL01")
+    # Legacy backward-compatibility fields:
+    bu_entities: dict[str, list[str]] | None = None
+    accounts: list[str] | None = None
     forecast_horizon: int = Field(default=12, ge=1, le=100)
     validation_split: float = Field(default=0.75, gt=0, lt=1)
     candidate_models: list[str] | None = None  # None = use all available

@@ -18,15 +18,24 @@ from backend.schemas.upload import (
     ColumnInfo,
     HeaderDetectionResult as HeaderDetectionSchema,
     InspectRequest,
+    MergeTransformRequest,
     TransformRequest,
     TransformResponse,
 )
-from backend.services.data_transformer import transform
-from backend.services.dataset_store import get_dataset
+from backend.services.data_transformer import TransformResult, transform
+from backend.services.dataset_store import get_dataset, save_merged_dataset
 from backend.services.excel_reader import load_raw_sheet, raw_preview
-from backend.services.header_detection import ColumnMapping, HeaderDetectionResult, detect_headers
+from backend.services.header_detection import ColumnMapping, HeaderDetectionResult, detect_headers, parse_period_label
 
 router = APIRouter(tags=["data"])
+
+
+def _format_date(val: Any) -> str:
+    if val is None:
+        return ""
+    if hasattr(val, "isoformat"):
+        return val.isoformat()
+    return str(val)
 
 
 @router.post("/datasets/{dataset_id}/inspect", response_model=HeaderDetectionSchema)
@@ -59,7 +68,7 @@ async def inspect_dataset(dataset_id: str, req: InspectRequest):
             original_index=c.original_index,
             name=c.name,
             role=c.role,
-            parsed_date=c.parsed_date.isoformat() if c.parsed_date else None,
+            parsed_date=_format_date(c.parsed_date) if c.parsed_date else None,
         )
 
     preview_rows = raw_preview(raw_df, n_rows=8)
@@ -71,8 +80,8 @@ async def inspect_dataset(dataset_id: str, req: InspectRequest):
         dimension_columns=[_to_info(c) for c in detection.dimension_columns],
         period_columns=[_to_info(c) for c in detection.period_columns],
         other_columns=[_to_info(c) for c in detection.columns if c.role == "other"],
-        date_range_start=detection.date_range_start.isoformat() if detection.date_range_start else None,
-        date_range_end=detection.date_range_end.isoformat() if detection.date_range_end else None,
+        date_range_start=_format_date(detection.date_range_start) if detection.date_range_start else None,
+        date_range_end=_format_date(detection.date_range_end) if detection.date_range_end else None,
         frequency=detection.frequency,
         confidence=detection.confidence,
         warnings=detection.warnings,
@@ -104,8 +113,37 @@ async def transform_dataset(dataset_id: str, req: TransformRequest):
             detail="Header detection must be run before transformation.",
         )
 
-    # Apply user overrides if specified
-    if req.header_depth is not None and req.header_depth > 0:
+    # Apply user schema overrides if specified
+    if req.schema_config:
+        sc = req.schema_config
+        record.schema_config = sc.model_dump()
+        detection.dimension_row_index = sc.dimension_row_index
+        detection.period_row_index = sc.period_row_index
+        # header_depth is simply 1 row after dimension_row_index
+        detection.header_depth = sc.dimension_row_index + 1
+
+        # Re-evaluate column roles and names from designated dimension and period rows
+        if record.raw_df is not None:
+            raw_dim_row = record.raw_df.iloc[sc.dimension_row_index] if sc.dimension_row_index < len(record.raw_df) else None
+            raw_period_row = record.raw_df.iloc[sc.period_row_index] if sc.period_row_index < len(record.raw_df) else None
+
+            for col in detection.columns:
+                c_idx = col.original_index
+                dim_val = raw_dim_row.iloc[c_idx] if raw_dim_row is not None and c_idx < len(raw_dim_row) else None
+                period_val = raw_period_row.iloc[c_idx] if raw_period_row is not None and c_idx < len(raw_period_row) else None
+
+                parsed_dt = parse_period_label(period_val)
+                if parsed_dt:
+                    col.role = "time_period"
+                    col.parsed_date = parsed_dt
+                    col.name = str(period_val).strip()
+                elif dim_val is not None and pd.notna(dim_val) and str(dim_val).strip():
+                    col.role = "dimension"
+                    col.name = str(dim_val).strip()
+                else:
+                    col.role = "other"
+
+    elif req.header_depth is not None and req.header_depth > 0:
         detection.header_depth = req.header_depth
 
     if req.dimension_column_indices is not None or req.period_column_indices is not None:
@@ -133,13 +171,182 @@ async def transform_dataset(dataset_id: str, req: TransformRequest):
         row_count=res.row_count,
         dimension_columns=res.dimension_columns,
         period_columns=res.period_columns,
-        date_range_start=res.date_range_start.isoformat(),
-        date_range_end=res.date_range_end.isoformat(),
+        date_range_start=_format_date(res.date_range_start),
+        date_range_end=_format_date(res.date_range_end),
         frequency=res.frequency,
         missing_value_count=res.missing_value_count,
         duplicate_count=res.duplicate_count,
         warnings=res.warnings,
         preview=res.preview(n=25),
+        schema_config=req.schema_config,
+    )
+
+
+@router.post("/datasets/merge-transform", response_model=TransformResponse)
+async def merge_transform_datasets(req: MergeTransformRequest):
+    """
+    Transforms multiple compatible datasets into long format and merges them into
+    a single continuous temporal series along primary dimension columns.
+    Enforces strict structure compatibility across all selected files.
+    """
+    if not req.dataset_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No dataset IDs were provided for merging.",
+        )
+
+    records: list[Any] = []
+    for d_id in req.dataset_ids:
+        rec = get_dataset(d_id)
+        if not rec:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Dataset '{d_id}' not found.",
+            )
+        if rec.raw_df is None:
+            sheet = req.sheet_name or rec.active_sheet or (rec.sheet_names[0] if rec.sheet_names else None)
+            if sheet and rec.file_path and rec.file_path.exists():
+                rec.raw_df = load_raw_sheet(rec.file_path, sheet)
+                rec.active_sheet = sheet
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Dataset '{d_id}' sheet not found or workbook file is missing.",
+                )
+        records.append(rec)
+
+    transform_results: list[TransformResult] = []
+    base_dims: list[str] | None = None
+    base_depth: int | None = None
+
+    for rec in records:
+        det = rec.header_detection
+        if det is None:
+            det = detect_headers(rec.raw_df, scan_rows=settings.header_scan_rows)
+
+        if req.schema_config:
+            sc = req.schema_config
+            rec.schema_config = sc.model_dump()
+            det.dimension_row_index = sc.dimension_row_index
+            det.period_row_index = sc.period_row_index
+            det.header_depth = sc.dimension_row_index + 1
+
+            if rec.raw_df is not None:
+                raw_dim_row = rec.raw_df.iloc[sc.dimension_row_index] if sc.dimension_row_index < len(rec.raw_df) else None
+                raw_period_row = rec.raw_df.iloc[sc.period_row_index] if sc.period_row_index < len(rec.raw_df) else None
+
+                for col in det.columns:
+                    c_idx = col.original_index
+                    dim_val = raw_dim_row.iloc[c_idx] if raw_dim_row is not None and c_idx < len(raw_dim_row) else None
+                    period_val = raw_period_row.iloc[c_idx] if raw_period_row is not None and c_idx < len(raw_period_row) else None
+
+                    parsed_dt = parse_period_label(period_val)
+                    if parsed_dt:
+                        col.role = "time_period"
+                        col.parsed_date = parsed_dt
+                        col.name = str(period_val).strip()
+                    elif dim_val is not None and pd.notna(dim_val) and str(dim_val).strip():
+                        col.role = "dimension"
+                        col.name = str(dim_val).strip()
+                    else:
+                        col.role = "other"
+
+        t_res = transform(rec.raw_df, det)
+        rec.transform_result = t_res
+
+        # Strict compatibility verification across files
+        if base_dims is None:
+            base_dims = list(t_res.dimension_columns)
+            base_depth = det.header_depth
+        else:
+            if t_res.dimension_columns != base_dims:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Cannot merge files with incompatible structure: "
+                        f"'{rec.filename}' has dimension columns {t_res.dimension_columns}, "
+                        f"which does not match '{records[0].filename}' ({base_dims}). "
+                        f"Files must share the exact same dimension structure."
+                    ),
+                )
+            if det.header_depth != base_depth:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Cannot merge files with incompatible header depth: "
+                        f"'{rec.filename}' has {det.header_depth} header rows "
+                        f"while '{records[0].filename}' has {base_depth} rows."
+                    ),
+                )
+
+        transform_results.append(t_res)
+
+    # Concatenate all long format DataFrames
+    all_long_dfs = [tr.long_df for tr in transform_results]
+    merged_long_df = pd.concat(all_long_dfs, ignore_index=True)
+
+    dim_cols = base_dims or []
+    merged_long_df = merged_long_df.sort_values(["date"] + dim_cols).reset_index(drop=True)
+
+    dup_cols = ["date"] + dim_cols
+    duplicate_count = int(merged_long_df.duplicated(subset=dup_cols).sum())
+    warnings: list[str] = []
+    if duplicate_count > 0:
+        warnings.append(
+            f"Merged dataset contains {duplicate_count} duplicate observations across files. Aggregated by sum."
+        )
+        merged_long_df = (
+            merged_long_df.groupby(dup_cols, dropna=False)["value"]
+            .sum()
+            .reset_index()
+        )
+
+    all_dates = sorted(merged_long_df["date"].dropna().unique())
+    d_start = pd.Timestamp(all_dates[0]) if all_dates else pd.Timestamp.now()
+    d_end = pd.Timestamp(all_dates[-1]) if all_dates else pd.Timestamp.now()
+
+    all_period_columns: list[str] = []
+    for tr in transform_results:
+        for p in tr.period_columns:
+            if p not in all_period_columns:
+                all_period_columns.append(p)
+
+    missing_value_count = int(merged_long_df["value"].isna().sum())
+
+    merged_transform_res = TransformResult(
+        long_df=merged_long_df,
+        dimension_columns=dim_cols,
+        period_columns=all_period_columns,
+        date_range_start=d_start,
+        date_range_end=d_end,
+        frequency=transform_results[0].frequency if transform_results else "M",
+        row_count=len(merged_long_df),
+        missing_value_count=missing_value_count,
+        duplicate_count=duplicate_count,
+        warnings=warnings,
+    )
+
+    merged_name = f"Merged ({len(records)} files: {', '.join(r.filename for r in records[:2])}{'...' if len(records) > 2 else ''})"
+    merged_record = save_merged_dataset(
+        filename=merged_name,
+        file_path=records[0].file_path,
+        transform_result=merged_transform_res,
+        schema_config=req.schema_config.model_dump() if req.schema_config else None,
+    )
+
+    return TransformResponse(
+        dataset_id=merged_record.dataset_id,
+        row_count=merged_transform_res.row_count,
+        dimension_columns=merged_transform_res.dimension_columns,
+        period_columns=merged_transform_res.period_columns,
+        date_range_start=_format_date(merged_transform_res.date_range_start),
+        date_range_end=_format_date(merged_transform_res.date_range_end),
+        frequency=merged_transform_res.frequency,
+        missing_value_count=merged_transform_res.missing_value_count,
+        duplicate_count=merged_transform_res.duplicate_count,
+        warnings=merged_transform_res.warnings,
+        preview=merged_transform_res.preview(n=25),
+        schema_config=req.schema_config,
     )
 
 
@@ -173,8 +380,8 @@ async def get_metadata(dataset_id: str):
         sheet_name=record.active_sheet or "",
         dimension_columns=res.dimension_columns,
         period_columns=res.period_columns,
-        date_range_start=res.date_range_start.isoformat(),
-        date_range_end=res.date_range_end.isoformat(),
+        date_range_start=_format_date(res.date_range_start),
+        date_range_end=_format_date(res.date_range_end),
         frequency=res.frequency,
         row_count=res.row_count,
         missing_value_count=res.missing_value_count,
@@ -207,11 +414,56 @@ async def get_dimensions(dataset_id: str):
         )
         dims.append(DimensionValues(name=col, values=sorted(unique_vals)))
 
-    # Detect key dimension roles case-insensitively
+    schema_cfg = record.schema_config or {}
+    target_col = schema_cfg.get("target_column") or next((c for c in dim_cols if c.lower() == "account"), None) or (dim_cols[0] if dim_cols else "Target")
+    desc_col = schema_cfg.get("description_column")
+    if not desc_col and next((c for c in dim_cols if c.lower() == "description"), None):
+        desc_col = next((c for c in dim_cols if c.lower() == "description"), None)
+
+    configured_hierarchy = schema_cfg.get("hierarchy_columns")
+    if configured_hierarchy is None:
+        bu_col = next((c for c in dim_cols if "business unit" in c.lower()), None)
+        ent_col = next((c for c in dim_cols if "legal_entity" in c.lower() or "legal entity" in c.lower()), None)
+        configured_hierarchy = [c for c in [bu_col, ent_col] if c and c in df.columns]
+
+    # Build dynamic multi-level hierarchy tree (supports any number of levels: BU -> Entity -> Product -> UOM)
+    def _build_tree(sub_df: pd.DataFrame, levels: list[str]) -> list[dict[str, Any]]:
+        if not levels or sub_df.empty:
+            return []
+        current_lvl = levels[0]
+        rem_lvls = levels[1:]
+        nodes = []
+        if current_lvl in sub_df.columns:
+            for val, grp in sub_df.groupby(current_lvl, dropna=True):
+                v_str = str(val).strip()
+                if not v_str:
+                    continue
+                node: dict[str, Any] = {"value": v_str}
+                if rem_lvls:
+                    node["children"] = _build_tree(grp, rem_lvls)
+                nodes.append(node)
+        return sorted(nodes, key=lambda n: n["value"])
+
+    hierarchy_tree = _build_tree(df, configured_hierarchy)
+
+    # Build targets with optional 1-to-1 description
+    target_options = []
+    if target_col and target_col in df.columns:
+        cols_to_use = [target_col]
+        if desc_col and desc_col in df.columns and desc_col != target_col:
+            cols_to_use.append(desc_col)
+
+        t_df = df[cols_to_use].dropna(subset=[target_col]).drop_duplicates().sort_values(target_col)
+        for _, r in t_df.iterrows():
+            val = str(r[target_col]).strip()
+            desc = str(r[desc_col]).strip() if desc_col and desc_col in t_df.columns and pd.notna(r[desc_col]) else None
+            lbl = f"{desc} ({val})" if desc else val
+            target_options.append({"value": val, "description": desc, "label": lbl})
+
+    # Legacy BU & Account mappings for backward compatibility
     bu_col = next((c for c in dim_cols if "business unit" in c.lower()), None)
     ent_col = next((c for c in dim_cols if "legal_entity" in c.lower() or "legal entity" in c.lower()), None)
     acc_col = next((c for c in dim_cols if c.lower() == "account"), None)
-    desc_col = next((c for c in dim_cols if c.lower() == "description"), None)
 
     bu_entity_hierarchy: dict[str, list[str]] = {}
     if bu_col and ent_col and bu_col in df.columns and ent_col in df.columns:
@@ -225,17 +477,17 @@ async def get_dimensions(dataset_id: str):
     account_items = []
     if acc_col and acc_col in df.columns:
         cols_to_use = [acc_col]
-        if desc_col and desc_col in df.columns:
-            cols_to_use.append(desc_col)
+        legacy_desc = next((c for c in dim_cols if c.lower() == "description"), None)
+        if legacy_desc and legacy_desc in df.columns:
+            cols_to_use.append(legacy_desc)
 
         acc_df = df[cols_to_use].dropna(subset=[acc_col]).drop_duplicates().sort_values(acc_col)
         for _, r in acc_df.iterrows():
             a = str(r[acc_col]).strip()
-            d = str(r[desc_col]).strip() if desc_col and pd.notna(r[desc_col]) else ""
+            d = str(r[legacy_desc]).strip() if legacy_desc and pd.notna(r[legacy_desc]) else ""
             lbl = f"{d} ({a})" if d else a
             account_items.append({"account": a, "description": d, "label": lbl})
 
-    # Relations between BU, Entity, and Account for dynamic filtering
     relations = []
     rel_cols = [c for c in [bu_col, ent_col, acc_col] if c and c in df.columns]
     if len(rel_cols) >= 2:
@@ -252,6 +504,11 @@ async def get_dimensions(dataset_id: str):
 
     return DimensionsResponse(
         dimensions=dims,
+        hierarchy_levels=configured_hierarchy,
+        hierarchy_tree=hierarchy_tree,
+        target_column=target_col,
+        description_column=desc_col,
+        targets=target_options,
         bu_entity_hierarchy=bu_entity_hierarchy,
         accounts=account_items,
         relations=relations,
@@ -343,7 +600,7 @@ async def get_series_info(dataset_id: str, req: SeriesInfoRequest):
             detail="Transformed dataset not found.",
         )
 
-    df = record.transform_result.long_df.copy()
+    df = record.transform_result.long_df
     dim_cols = record.transform_result.dimension_columns
     warnings_out: list[str] = []
 
@@ -351,23 +608,47 @@ async def get_series_info(dataset_id: str, req: SeriesInfoRequest):
     ent_col = next((c for c in dim_cols if "legal_entity" in c.lower() or "legal entity" in c.lower()), None)
     acc_col = next((c for c in dim_cols if c.lower() == "account"), None)
 
-    # Hierarchical BU + Legal Entity filter
-    if req.bu_entities and bu_col and ent_col and bu_col in df.columns and ent_col in df.columns:
-        masks = []
+    # 1. OPTIMIZATION: Filter target value FIRST to immediately discard 95-98% of rows!
+    schema_cfg = record.schema_config or {}
+    target_col = schema_cfg.get("target_column") or acc_col
+    if req.target_value and target_col and target_col in df.columns:
+        df = df[df[target_col].astype(str) == str(req.target_value)]
+
+    # Account filter (legacy)
+    if not req.target_value and req.accounts and acc_col and acc_col in df.columns:
+        df = df[df[acc_col].astype(str).isin([str(a) for a in req.accounts])]
+
+    # 2. Fast vectorized multi-level hierarchy filter (O(1) set lookup instead of O(N*M) loop)
+    if req.hierarchy_selections:
+        sel_df = pd.DataFrame(req.hierarchy_selections).dropna(how="all")
+        valid_cols = [c for c in sel_df.columns if c in df.columns]
+        if valid_cols:
+            sel_df = sel_df[valid_cols].drop_duplicates()
+            if len(valid_cols) == 1:
+                col = valid_cols[0]
+                allowed_vals = set(sel_df[col].astype(str))
+                df = df[df[col].astype(str).isin(allowed_vals)]
+            else:
+                for c in valid_cols:
+                    sel_df[c] = sel_df[c].astype(str)
+                    df[c] = df[c].astype(str)
+                df = df.merge(sel_df, on=valid_cols, how="inner")
+
+    # Hierarchical BU + Legal Entity filter (legacy)
+    if not req.hierarchy_selections and req.bu_entities and bu_col and ent_col and bu_col in df.columns and ent_col in df.columns:
+        bu_ent_pairs = []
         for bu, entities in req.bu_entities.items():
             if entities:
-                masks.append((df[bu_col] == bu) & (df[ent_col].isin(entities)))
+                for ent in entities:
+                    bu_ent_pairs.append({bu_col: str(bu), ent_col: str(ent)})
             else:
-                masks.append(df[bu_col] == bu)
-        if masks:
-            comb = masks[0]
-            for m in masks[1:]:
-                comb = comb | m
-            df = df[comb]
-
-    # Account filter
-    if req.accounts and acc_col and acc_col in df.columns:
-        df = df[df[acc_col].isin(req.accounts)]
+                bu_ent_pairs.append({bu_col: str(bu)})
+        if bu_ent_pairs:
+            p_df = pd.DataFrame(bu_ent_pairs).drop_duplicates()
+            if ent_col in p_df.columns and not p_df[ent_col].isna().all():
+                df = df.merge(p_df, on=[bu_col, ent_col], how="inner")
+            else:
+                df = df[df[bu_col].astype(str).isin(set(p_df[bu_col]))]
 
     # Other filters
     for dim, vals in req.filters.items():
@@ -376,7 +657,7 @@ async def get_series_info(dataset_id: str, req: SeriesInfoRequest):
         if req.accounts and dim in [acc_col, "Description", "description"]:
             continue
         if dim in df.columns and vals:
-            df = df[df[dim].isin(vals)]
+            df = df[df[dim].astype(str).isin([str(v) for v in vals])]
 
     if df.empty:
         return SeriesInfoResponse(
