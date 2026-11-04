@@ -57,6 +57,26 @@ flowchart LR
 
 ---
 
+## Application Walkthrough & Screenshots
+
+| 1. Data Upload & Split-Header Detection | 2. Schema Confirmation & Transformation |
+|:---:|:---:|
+| ![Upload Screen](Images/HomePage.png) | ![Transforming Data](Images/TransformingData.png) |
+
+| 3. Forecast Configuration & Independent Scroll | 4. Model Training Tournament |
+|:---:|:---:|
+| ![Forecast Configuration](Images/ForecastConfiguration.png) | ![Model Training](Images/ModelTraining.png) |
+
+| 5. Forecast Report & Trajectory Chart | 6. Forecast Values & Period Trend Table |
+|:---:|:---:|
+| ![Forecast Report](Images/ForecastReport.png) | ![Forecast Values](Images/ForecastValues.png) |
+
+| 7. Statistical Explanation (Trend, Seasonality, ACF) | 8. Hierarchical Segment-Wise Matrix |
+|:---:|:---:|
+| ![Explanation Report](Images/ExplanationReport.png) | ![Segment-Wise Report](Images/SegmentWiseReport.png) |
+
+---
+
 ## Project Structure
 
 ```text

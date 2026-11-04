@@ -236,39 +236,79 @@ Expected result: Clean build with 0 TypeScript compilation errors.
 
 ## Step 8: End-to-End Workflow Walkthrough
 
-1. **Step 1: Upload Data (`/upload`)**
-   - Click **Download Sample Excel** in the top-right header to get a pre-formatted template (`sample_timeseries_structure.xlsx`).
-   - Drag & drop single files or switch to **Multi-File Stitching** to stitch multiple annual files (e.g. 2023, 2024, 2025).
-   - Review the automatic detection of Row 1 (Periods) and Row 2 (Dimensions).
-   - Click **Confirm & Transform**.
+Follow these steps to run an end-to-end forecasting pipeline in the application:
 
-2. **Step 2: Configure Forecast (`/configure`)**
-   - Use the cascading dropdowns for **Business Unit**, **Legal Entity**, and child dimensions.
-   - Notice that options are uniquely scoped (e.g., `"BU1-1400"` vs `"BU2-1400"`) and selected items stay pinned at the top.
-   - Select your target account (e.g., `PL01 – Sales Revenue`).
-   - Verify the historical observations count and dynamically suggested horizon.
-   - Click **Start Forecasting Tournament**.
+### Step 8.1: Upload Data & Layout Inspection (`/upload`)
+- Open the application at [http://localhost:5173/upload](http://localhost:5173/upload).
+- Click **Download Sample Excel** in the top action bar to retrieve the sample template (`sample_timeseries_structure.xlsx`) if you need a reference file.
+- Upload a single workbook or choose **Multi-File Stitching** to combine multiple annual workbooks.
+- The system automatically detects multi-row headers (Row 1: Periods, Row 2: Dimensions).
 
-3. **Step 3: Training Tournament (`/training`)**
-   - Watch candidate models compete side-by-side in real time across statistical, machine learning, and baseline families.
-   - The winning model is crowned based on lowest validation MAPE.
-   - The winning champion is automatically refitted on 100% of historical observations.
+![Data Upload & Multi-Row Header Detection](Images/HomePage.png)
 
-4. **Step 4: Forecast Report (`/report/forecast`)**
-   - Inspect historical actuals seamlessly joined with the projected trajectory.
-   - Review validation curves, residual errors, and period-over-period numbers.
-   - Export forecast tables to CSV or Excel.
+---
 
-5. **Step 5: Explanation Report (`/report/explanation`)**
-   - Review decomposition graphs: linear trend slope, annual 12-month seasonality, and autocorrelation (ACF) diagnostic bars.
+### Step 8.2: Confirm Schema & Transform Data
+- Review the detected period start/end dates, dimension columns, and preview table.
+- Adjust target column mapping if needed (defaults to `ACCOUNT` or first column).
+- Click **Confirm & Transform** to pivot the wide matrix into a normalized long format.
 
-6. **Step 6: Segment-Wise Report (`/report/segment-wise`)**
-   - View independent predictions generated for every leaf segment in a hierarchical tree matrix matching the exact SAP Analytics Cloud Story format.
-   - Export full hierarchical matrix directly to formatted `.xlsx` or `.csv`.
+![Confirm and Transform Data](Images/TransformingData.png)
 
-7. **Starting a New Session**:
-   - Return to `/upload` or click **New Session** in the top navigation bar.
-   - All previous jobs, data frames, and selections are cleanly reset.
+---
+
+### Step 8.3: Forecast Configuration (`/configure`)
+- **Multi-Level Hierarchy Selection (Left Panel)**: Select Business Units, Legal Entities, and Product categories. Collision-free IDs (e.g. `"BU1-1400"`) prevent unintended cross-BU selections, and active items stay pinned at the top.
+- **Forecasting Target**: Select your target financial or operational metric (e.g., `Sales Revenue (PL01)`).
+- **Parameters & Telemetry (Right Panel)**: The right panel has an independent scrollbar while the left panel stays locked in place. Review observation counts, select your custom training date range, and adjust the forecast horizon (defaults to the recommended 4:1 training ratio).
+- Click **Train and Forecast**.
+
+![Forecast Configuration](Images/ForecastConfiguration.png)
+
+---
+
+### Step 8.4: Real-Time Model Training Tournament (`/training`)
+- Watch candidate models compete in an automated tournament across statistical, machine learning, and baseline families.
+- Live progress shows real-time percentage completion, active model fitting, duration in seconds, and execution log tail.
+- Once tournament evaluation completes, the winning model (lowest finite validation MAPE) is selected as Champion and automatically refitted on 100% of historical observations.
+
+![Model Training Tournament](Images/ModelTraining.png)
+
+---
+
+### Step 8.5: Interactive Forecast Report (`/report/forecast`)
+- **Historical vs. Forecast Chart**: Seamlessly visualizes actual historical observations alongside the orange future forecast trajectory.
+- **Validation Accuracy**: Evaluates out-of-sample backtest performance (Actual vs. Predicted, MAPE, MAE, RMSE).
+- **Forecast Table**: Displays period-over-period forecasted figures with export options to CSV or Excel.
+
+![Historical Actuals & Future Forecast Chart](Images/ForecastReport.png)
+
+![Forecast Values & Period-Over-Period Trend](Images/ForecastValues.png)
+
+---
+
+### Step 8.6: Statistical Explanation Report (`/report/explanation`)
+- **Trend Trajectory**: Extracts linear slope direction and overall historical momentum.
+- **Seasonality Pattern**: Identifies recurring annual 12-month seasonal peaks and valleys.
+- **Autocorrelation (ACF) Diagnostics**: Plots ACF lag correlation bars to detect repeating cyclic behavior.
+
+![Statistical Explanation Report](Images/ExplanationReport.png)
+
+---
+
+### Step 8.7: Hierarchical Segment-Wise Report (`/report/segment-wise`)
+- Displays an independent forecast table broken down across every selected leaf segment.
+- Formatted as a multi-level hierarchical matrix mirroring the SAP Analytics Cloud Story export layout.
+- Provides immediate warnings for sparse segments with insufficient data (< 4 points).
+- Allows one-click export to **Export Story .xlsx** or CSV.
+
+![Segment-Wise Forecast Table](Images/SegmentWiseReport.png)
+
+---
+
+### Step 8.8: Starting a Fresh Session
+- When done, click **New Session** in the top navigation bar or simply upload new files on the Upload page.
+- All previous tournament jobs, segment predictions, and parameters are automatically reset.
 
 ---
 
