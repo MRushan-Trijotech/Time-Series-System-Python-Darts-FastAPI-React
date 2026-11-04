@@ -1,348 +1,40 @@
-# Complete Setup & Run Instructions
+# Smart Predict Studio – Setup & Usage Instructions
 
-This document provides step-by-step instructions to clone, set up, configure, and run the **Smart Predict Studio** time-series forecasting application from scratch.
-
----
-
-## Prerequisites
-
-Before starting, ensure you have the following installed on your machine:
-
-1. **Git**: [Download Git](https://git-scm.com/downloads)
-2. **Python 3.12** (Python 3.12.x recommended; Python 3.13 is also supported):
-   - Check version:
-     ```bash
-     python --version
-     ```
-3. **Node.js (v18.x or v20.x+) & npm**:
-   - Check version:
-     ```bash
-     node -v
-     npm -v
-     ```
-4. **`uv` (Recommended Python package manager)**:
-   - Extremely fast installer and runner for Python environments.
-   - Install via `pip`:
-     ```bash
-     pip install uv
-     ```
-   - Or install via official standalone installers:
-     - **Windows (PowerShell)**:
-       ```powershell
-       powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-       ```
-     - **macOS / Linux (curl)**:
-       ```bash
-       curl -LsSf https://astral.sh/uv/install.sh | sh
-       ```
-   *(Alternatively, you can use standard Python `venv` + `pip` as described in Step 2B below).*
+Welcome to **Smart Predict Studio**! The setup and execution instructions are split into two dedicated guides depending on whether you want to use the live cloud application or run it locally:
 
 ---
 
-## Step 1: Clone the Repository
+## 📖 Choose Your Guide
 
-Open your terminal or PowerShell and run:
+| Guide | Description | Target Use Case |
+|---|---|---|
+| 🌐 **[Instruction_Deployed.md](./Instruction_Deployed.md)** | **Live Cloud Deployment Guide** | Use the application online on Render right now without installing anything locally. Explains cloud cold-start procedures and online workflow. |
+| 💻 **[Instruction_Local.md](./Instruction_Local.md)** | **Local Development & Setup Guide** | Step-by-step instructions from `git clone` to `uvicorn` and `npm run dev` to install and run the full stack on your machine. |
 
+---
+
+## Quick Reference Links
+
+### 1. Online Deployed App
+- **Backend API (Swagger Docs)**: [https://timeseries-backend-qoem.onrender.com/docs](https://timeseries-backend-qoem.onrender.com/docs)
+- **Frontend Web Application**: [https://timeseries-frontend.onrender.com](https://timeseries-frontend.onrender.com)
+- *See [Instruction_Deployed.md](./Instruction_Deployed.md) for the 2-step startup order to handle Render cold-starts.*
+
+### 2. Local Setup Commands
 ```bash
+# Clone Repository
 git clone https://github.com/MRushan-Trijotech/Time-Series-System-Python-Darts-FastAPI-React.git
 cd Time-Series-System-Python-Darts-FastAPI-React
-```
 
-Verify you are in the root directory containing the `Backend/` and `Frontend/` folders:
-
-```text
-Time-Series-System-Python-Darts-FastAPI-React/
-├── Backend/
-├── Frontend/
-├── README.md
-├── Instruction.md
-└── .gitignore
-```
-
----
-
-## Step 2: Backend Setup & Installation
-
-You will need two separate terminal windows: one for the Backend and one for the Frontend.
-
-### Method A: Using `uv` (Recommended & Fastest)
-
-1. Open your first terminal and navigate to the `Backend` directory:
-   ```bash
-   cd Backend
-   ```
-
-2. Create the virtual environment using `uv`:
-   ```bash
-   uv venv .venv
-   ```
-
-3. Activate the virtual environment:
-   - **Windows (PowerShell)**:
-     ```powershell
-     .venv\Scripts\activate
-     ```
-   - **Windows (Command Prompt)**:
-     ```cmd
-     .venv\Scripts\activate.bat
-     ```
-   - **macOS / Linux**:
-     ```bash
-     source .venv/bin/activate
-     ```
-
-4. Synchronize and install all dependencies:
-   ```bash
-   uv sync
-   ```
-   *This automatically sets up Python 3.12 and installs all project dependencies (FastAPI, Darts, Pandas, Scikit-learn, LightGBM, CatBoost, Statsmodels, Uvicorn, etc.) directly into `.venv/`.*
-
----
-
-### Method B: Using Standard Python `venv` and `pip`
-
-If you prefer not to use `uv`, you can use Python's built-in `venv`:
-
-1. Open your terminal and navigate to `Backend`:
-   ```bash
-   cd Backend
-   ```
-
-2. Create a virtual environment:
-   - **Windows**:
-     ```powershell
-     python -m venv .venv
-     .venv\Scripts\activate
-     ```
-   - **macOS / Linux**:
-     ```bash
-     python3 -m venv .venv
-     source .venv/bin/activate
-     ```
-
-3. Upgrade `pip` and install backend dependencies:
-   ```bash
-   pip install --upgrade pip
-   pip install -e .
-   pip install pytest pytest-asyncio httpx
-   ```
-
----
-
-## Step 3: Run the Backend Server (Uvicorn)
-
-From inside the `Backend` directory:
-
-### If using `uv`:
-```bash
+# Terminal 1: Backend
+cd Backend
+uv venv .venv
+uv sync
 uv run uvicorn backend.main:app --reload --port 8000
-```
 
-### If using standard virtualenv (with `.venv` activated):
-```bash
-uvicorn backend.main:app --reload --port 8000
-```
-
-You should see output similar to:
-```text
-INFO:     Will watch for changes in these directories: ['...']
-INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
-INFO:     Started reloader process [...] using StatReload
-INFO:     Started server process [...]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-```
-
-Leave this terminal running.
-
----
-
-## Step 4: Frontend Setup & Installation
-
-Open a **second terminal window** and navigate to the `Frontend` directory:
-
-```bash
+# Terminal 2: Frontend
 cd Frontend
-```
-
-Install the Node.js packages using `npm`:
-
-```bash
 npm install
-```
-
----
-
-## Step 5: Run the Frontend Application
-
-From inside the `Frontend` directory, launch the Vite development server:
-
-```bash
 npm run dev
 ```
-
-You should see output similar to:
-```text
-  VITE v8.3.5  ready in 250 ms
-
-  ➜  Local:   http://localhost:5173/
-  ➜  Network: use --host to expose
-  ➜  press h + enter to show help
-```
-
----
-
-## Step 6: Verify the Setup in Your Browser
-
-1. **Frontend Web UI**: Open your browser and navigate to:
-   [http://localhost:5173](http://localhost:5173)
-
-2. **Backend API Swagger Documentation**:
-   [http://localhost:8000/docs](http://localhost:8000/docs)
-
-3. **Backend Health Check**:
-   [http://localhost:8000/api/health](http://localhost:8000/api/health)
-   *(Should return `{"status": "healthy", ...}`)*
-
----
-
-## Step 7: Running Test Suites & Verification
-
-### Run Backend Tests (Pytest)
-
-In the Backend terminal:
-
-```bash
-# With uv:
-uv run pytest tests/ -v
-
-# Or with activated .venv:
-pytest tests/ -v
-```
-
-Expected result: All unit and integration tests passing (`100%`).
-
-### Verify Frontend TypeScript & Production Build
-
-In the Frontend terminal:
-
-```bash
-npm run build
-```
-
-Expected result: Clean build with 0 TypeScript compilation errors.
-
----
-
-## Step 8: End-to-End Workflow Walkthrough
-
-Follow these steps to run an end-to-end forecasting pipeline in the application:
-
-### Step 8.1: Upload Data & Layout Inspection (`/upload`)
-- Open the application at [http://localhost:5173/upload](http://localhost:5173/upload).
-- Click **Download Sample Excel** in the top action bar to retrieve the sample template (`sample_timeseries_structure.xlsx`) if you need a reference file.
-- Upload a single workbook or choose **Multi-File Stitching** to combine multiple annual workbooks.
-- The system automatically detects multi-row headers (Row 1: Periods, Row 2: Dimensions).
-
-![Data Upload & Multi-Row Header Detection](Images/HomePage.png)
-
----
-
-### Step 8.2: Confirm Schema & Transform Data
-- Review the detected period start/end dates, dimension columns, and preview table.
-- Adjust target column mapping if needed (defaults to `ACCOUNT` or first column).
-- Click **Confirm & Transform** to pivot the wide matrix into a normalized long format.
-
-![Confirm and Transform Data](Images/TransformingData.png)
-
----
-
-### Step 8.3: Forecast Configuration (`/configure`)
-- **Multi-Level Hierarchy Selection (Left Panel)**: Select Business Units, Legal Entities, and Product categories. Collision-free IDs (e.g. `"BU1-1400"`) prevent unintended cross-BU selections, and active items stay pinned at the top.
-- **Forecasting Target**: Select your target financial or operational metric (e.g., `Sales Revenue (PL01)`).
-- **Parameters & Telemetry (Right Panel)**: The right panel has an independent scrollbar while the left panel stays locked in place. Review observation counts, select your custom training date range, and adjust the forecast horizon (defaults to the recommended 4:1 training ratio).
-- Click **Train and Forecast**.
-
-![Forecast Configuration](Images/ForecastConfiguration.png)
-
----
-
-### Step 8.4: Real-Time Model Training Tournament (`/training`)
-- Watch candidate models compete in an automated tournament across statistical, machine learning, and baseline families.
-- Live progress shows real-time percentage completion, active model fitting, duration in seconds, and execution log tail.
-- Once tournament evaluation completes, the winning model (lowest finite validation MAPE) is selected as Champion and automatically refitted on 100% of historical observations.
-
-![Model Training Tournament](Images/ModelTraining.png)
-
----
-
-### Step 8.5: Interactive Forecast Report (`/report/forecast`)
-- **Historical vs. Forecast Chart**: Seamlessly visualizes actual historical observations alongside the orange future forecast trajectory.
-- **Validation Accuracy**: Evaluates out-of-sample backtest performance (Actual vs. Predicted, MAPE, MAE, RMSE).
-- **Forecast Table**: Displays period-over-period forecasted figures with export options to CSV or Excel.
-
-![Historical Actuals & Future Forecast Chart](Images/ForecastReport.png)
-
-![Forecast Values & Period-Over-Period Trend](Images/ForecastValues.png)
-
----
-
-### Step 8.6: Statistical Explanation Report (`/report/explanation`)
-- **Trend Trajectory**: Extracts linear slope direction and overall historical momentum.
-- **Seasonality Pattern**: Identifies recurring annual 12-month seasonal peaks and valleys.
-- **Autocorrelation (ACF) Diagnostics**: Plots ACF lag correlation bars to detect repeating cyclic behavior.
-
-![Statistical Explanation Report](Images/ExplanationReport.png)
-
----
-
-### Step 8.7: Hierarchical Segment-Wise Report (`/report/segment-wise`)
-- Displays an independent forecast table broken down across every selected leaf segment.
-- Formatted as a multi-level hierarchical matrix mirroring the SAP Analytics Cloud Story export layout.
-- Provides immediate warnings for sparse segments with insufficient data (< 4 points).
-- Allows one-click export to **Export Story .xlsx** or CSV.
-
-![Segment-Wise Forecast Table](Images/SegmentWiseReport.png)
-
----
-
-### Step 8.8: Starting a Fresh Session
-- When done, click **New Session** in the top navigation bar or simply upload new files on the Upload page.
-- All previous tournament jobs, segment predictions, and parameters are automatically reset.
-
----
-
-## Common Troubleshooting & FAQs
-
-### 1. `uvicorn: command not found`
-- **Cause**: Virtual environment is not activated or dependencies were not installed.
-- **Fix**: Run `uv sync` inside `Backend` and use `uv run uvicorn backend.main:app --reload --port 8000`, or activate `.venv` first (`.venv\Scripts\activate` on Windows).
-
-### 2. `Network Error` or CORS issues when clicking Transform
-- **Cause**: Backend server is not running on port 8000.
-- **Fix**: Verify backend terminal is running and shows `Uvicorn running on http://127.0.0.1:8000`. Test `http://localhost:8000/api/health` in your browser.
-
-### 3. Port 8000 or 5173 Already in Use
-- **Windows**:
-  ```powershell
-  # Find PID using port 8000:
-  netstat -ano | findstr :8000
-  # Terminate PID:
-  taskkill /PID <PID> /F
-  ```
-- **macOS / Linux**:
-  ```bash
-  lsof -i :8000
-  kill -9 <PID>
-  ```
-
-### 4. PowerShell Execution Policy Restriction on Windows
-- **Error**: `File ... activate.ps1 cannot be loaded because running scripts is disabled on this system.`
-- **Fix**: Open PowerShell as Administrator and run:
-  ```powershell
-  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-  ```
-
-### 5. Memory Considerations (Free Cloud Tiers like Render 512MB RAM)
-- The backend incorporates streaming readers, chunked previewing, category datatype compression, and garbage collection sweeps (`gc.collect()`) to run reliably within 512MB RAM constraints.
-
+- *See [Instruction_Local.md](./Instruction_Local.md) for full prerequisites, test suite execution, and troubleshooting FAQs.*

@@ -11,6 +11,20 @@
 
 ---
 
+## Live Demo / Deployed Application
+
+Experience the live deployed platform directly in your browser:
+
+- **Backend API (Swagger Docs)**: [https://timeseries-backend-qoem.onrender.com/docs](https://timeseries-backend-qoem.onrender.com/docs)
+- **Frontend Web Application**: [https://timeseries-frontend.onrender.com](https://timeseries-frontend.onrender.com)
+
+> [!IMPORTANT]
+> **Render Cold Start Notice**:
+> The services are hosted on Render's free tier, which puts idle services to sleep after 15 minutes.
+> **Please open the Backend URL first** ([https://timeseries-backend-qoem.onrender.com/docs](https://timeseries-backend-qoem.onrender.com/docs)) and allow ~30–50 seconds for the backend instance to spin up. Once the FastAPI Swagger UI loads, open the **Frontend Application** ([https://timeseries-frontend.onrender.com](https://timeseries-frontend.onrender.com)) for smooth, uninterrupted forecasting.
+
+---
+
 ## Key Capabilities
 
 ```mermaid
@@ -75,6 +89,10 @@ flowchart LR
 |:---:|:---:|
 | ![Explanation Report](Images/ExplanationReport.png) | ![Segment-Wise Report](Images/SegmentWiseReport.png) |
 
+| 9. Fast-API Interactive Swagger Docs | Live Deployed Platform |
+|:---:|:---:|
+| ![FastAPI Swagger Docs](Images/Backend_APIs.png) | [Open Live Demo](https://timeseries-frontend.onrender.com) |
+
 ---
 
 ## Project Structure
@@ -124,11 +142,13 @@ Time_Series_App/
 
 ---
 
-## Quick Start Summary
+## Quick Start & Documentation
+
+- 🌐 **Live Cloud Deployment Guide**: **[Instruction_Deployed.md](file:///e:/Mohd_Rushan/Time%20Series/Time_Series_App/Instruction_Deployed.md)** – Step-by-step instructions to use the live hosted app on Render.
+- 💻 **Local Development Guide**: **[Instruction_Local.md](file:///e:/Mohd_Rushan/Time%20Series/Time_Series_App/Instruction_Local.md)** – Step-by-step instructions to clone, install, and run locally.
+- 📖 **Index Guide**: **[Instruction.md](file:///e:/Mohd_Rushan/Time%20Series/Time_Series_App/Instruction.md)**
 
 Repository: [https://github.com/MRushan-Trijotech/Time-Series-System-Python-Darts-FastAPI-React.git](https://github.com/MRushan-Trijotech/Time-Series-System-Python-Darts-FastAPI-React.git)
-
-For the step-by-step setup guide from repository cloning to running servers, see **[Instruction.md](file:///e:/Mohd_Rushan/Time%20Series/Time_Series_App/Instruction.md)**.
 
 ### Quick Commands
 
