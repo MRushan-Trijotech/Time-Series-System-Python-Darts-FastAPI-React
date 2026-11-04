@@ -53,13 +53,29 @@ const CompactMultiSelect: React.FC<MultiSelectProps> = ({
     return () => document.removeEventListener('mousedown', handleOutsideClick)
   }, [])
 
-  const filtered = useMemo(() => {
-    if (!search.trim()) return options
-    const q = search.toLowerCase()
-    return options.filter(
-      (o) => o.value.toLowerCase().includes(q) || o.label.toLowerCase().includes(q)
-    )
-  }, [options, search])
+  const { selectedList, unselectedList } = useMemo(() => {
+    let list = options
+    if (search.trim()) {
+      const q = search.toLowerCase()
+      list = options.filter(
+        (o) => o.value.toLowerCase().includes(q) || o.label.toLowerCase().includes(q)
+      )
+    }
+    if (selectedValues.length === 0) {
+      return { selectedList: [], unselectedList: list }
+    }
+    const selectedSet = new Set(selectedValues)
+    const sel: typeof options = []
+    const unsel: typeof options = []
+    for (const opt of list) {
+      if (selectedSet.has(opt.value)) {
+        sel.push(opt)
+      } else {
+        unsel.push(opt)
+      }
+    }
+    return { selectedList: sel, unselectedList: unsel }
+  }, [options, search, selectedValues])
 
   const isAllSelected = options.length > 0 && selectedValues.length === options.length
   const isNoneSelected = selectedValues.length === 0
@@ -74,6 +90,36 @@ const CompactMultiSelect: React.FC<MultiSelectProps> = ({
 
   const selectAll = () => onChange(options.map((o) => o.value))
   const clearAll = () => onChange([])
+
+  const renderOption = (opt: { value: string; label: string; group?: string }, checked: boolean) => (
+    <div
+      key={opt.value}
+      onClick={() => toggleValue(opt.value)}
+      className={`px-2.5 py-1.5 rounded-md text-xs cursor-pointer flex items-center justify-between transition ${
+        checked
+          ? 'bg-blue-50/70 text-blue-900 font-medium'
+          : 'hover:bg-slate-50 text-slate-700'
+      }`}
+    >
+      <div className="flex items-center gap-2 truncate">
+        <div
+          className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
+            checked
+              ? 'bg-blue-600 border-blue-600 text-white'
+              : 'border-slate-300 bg-white'
+          }`}
+        >
+          {checked && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+        </div>
+        <span className="truncate">{opt.label}</span>
+      </div>
+      {opt.group && (
+        <span className="text-[10px] text-slate-400 shrink-0 ml-1 font-mono">
+          {opt.group}
+        </span>
+      )}
+    </div>
+  )
 
   return (
     <div className="relative" ref={containerRef}>
@@ -153,41 +199,29 @@ const CompactMultiSelect: React.FC<MultiSelectProps> = ({
 
           {/* Options List */}
           <div className="max-h-52 overflow-y-auto space-y-0.5 pr-0.5">
-            {filtered.length === 0 ? (
+            {selectedList.length === 0 && unselectedList.length === 0 ? (
               <p className="text-xs text-slate-400 p-3 text-center italic">No matching items</p>
             ) : (
-              filtered.map((opt) => {
-                const checked = selectedValues.includes(opt.value)
-                return (
-                  <div
-                    key={opt.value}
-                    onClick={() => toggleValue(opt.value)}
-                    className={`px-2.5 py-1.5 rounded-md text-xs cursor-pointer flex items-center justify-between transition ${
-                      checked
-                        ? 'bg-blue-50/70 text-blue-900 font-medium'
-                        : 'hover:bg-slate-50 text-slate-700'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 truncate">
-                      <div
-                        className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
-                          checked
-                            ? 'bg-blue-600 border-blue-600 text-white'
-                            : 'border-slate-300 bg-white'
-                        }`}
-                      >
-                        {checked && <Check className="w-2.5 h-2.5 stroke-[3]" />}
-                      </div>
-                      <span className="truncate">{opt.label}</span>
+              <>
+                {selectedList.length > 0 && (
+                  <div className="pb-1 mb-1 border-b border-slate-100">
+                    <div className="px-2 py-0.5 text-[10px] font-semibold text-blue-600 uppercase tracking-wider flex items-center justify-between">
+                      <span>Selected ({selectedList.length})</span>
                     </div>
-                    {opt.group && (
-                      <span className="text-[10px] text-slate-400 shrink-0 ml-1 font-mono">
-                        {opt.group}
-                      </span>
-                    )}
+                    {selectedList.map((opt) => renderOption(opt, true))}
                   </div>
-                )
-              })
+                )}
+                {unselectedList.length > 0 && (
+                  <div>
+                    {selectedList.length > 0 && (
+                      <div className="px-2 py-0.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                        <span>Other items</span>
+                      </div>
+                    )}
+                    {unselectedList.map((opt) => renderOption(opt, false))}
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -434,35 +468,30 @@ export const ConfigurationPage: React.FC = () => {
 
     // Level 1+ options: cascade from parent level selections
     for (let lvl = 1; lvl < hierarchyLevels.length; lvl++) {
-      const parentLvl = lvl - 1
-      const parentSelected = selectedByLevel[parentLvl] || []
-
-      // If parent has specific selections, filter nodes whose parent matches
       const levelOpts: { value: string; label: string; group?: string }[] = []
       const seen = new Set<string>()
 
-      const traverse = (node: HierarchyTreeNode, currentDepth: number, parentVal: string) => {
+      const traverse = (node: HierarchyTreeNode, currentDepth: number, parentScopedVal: string) => {
+        const scopedVal = currentDepth === 0 ? node.value : `${parentScopedVal}-${node.value}`
         if (currentDepth === lvl) {
-          const key = `${parentVal}__${node.value}`
-          if (!seen.has(key)) {
-            seen.add(key)
+          if (!seen.has(scopedVal)) {
+            seen.add(scopedVal)
             levelOpts.push({
-              value: node.value,
-              label: node.value,
-              group: parentVal,
+              value: scopedVal,
+              label: scopedVal,
+              group: parentScopedVal,
             })
           }
           return
         }
         if (node.children) {
+          const selectedAtDepth = selectedByLevel[currentDepth] || []
           const shouldFollow =
-            currentDepth !== parentLvl ||
-            parentSelected.length === 0 ||
-            parentSelected.includes(node.value)
+            selectedAtDepth.length === 0 || selectedAtDepth.includes(scopedVal)
 
           if (shouldFollow) {
             node.children.forEach((child) =>
-              traverse(child, currentDepth + 1, currentDepth === parentLvl ? node.value : parentVal)
+              traverse(child, currentDepth + 1, scopedVal)
             )
           }
         }
@@ -484,10 +513,16 @@ export const ConfigurationPage: React.FC = () => {
     if (!hasAnySelection) return undefined
 
     const leaves: Record<string, string>[] = []
-    const traverseToLeaves = (node: HierarchyTreeNode, depth: number, currentBranch: Record<string, string>) => {
+    const traverseToLeaves = (
+      node: HierarchyTreeNode,
+      depth: number,
+      currentBranch: Record<string, string>,
+      parentScopedVal: string
+    ) => {
       const colName = hierarchyLevels[depth]
+      const scopedVal = depth === 0 ? node.value : `${parentScopedVal}-${node.value}`
       const selectedForThisLevel = selectedByLevel[depth] || []
-      const isIncluded = selectedForThisLevel.length === 0 || selectedForThisLevel.includes(node.value)
+      const isIncluded = selectedForThisLevel.length === 0 || selectedForThisLevel.includes(scopedVal)
       if (!isIncluded) return
 
       const newBranch = { ...currentBranch, [colName]: node.value }
@@ -495,11 +530,11 @@ export const ConfigurationPage: React.FC = () => {
       if (depth === hierarchyLevels.length - 1 || !node.children || node.children.length === 0) {
         leaves.push(newBranch)
       } else {
-        node.children.forEach((child) => traverseToLeaves(child, depth + 1, newBranch))
+        node.children.forEach((child) => traverseToLeaves(child, depth + 1, newBranch, scopedVal))
       }
     }
 
-    hierarchyTree.forEach((root) => traverseToLeaves(root, 0, {}))
+    hierarchyTree.forEach((root) => traverseToLeaves(root, 0, {}, ''))
     return leaves.length > 0 ? leaves : undefined
   }, [hierarchyLevels, hierarchyTree, selectedByLevel])
 
@@ -521,9 +556,14 @@ export const ConfigurationPage: React.FC = () => {
     hierarchyTree.forEach((root) => {
       if (buSelected.length === 0 || buSelected.includes(root.value)) {
         const ents = (root.children || [])
+          .filter((c) => {
+            const scopedChild = `${root.value}-${c.value}`
+            return entSelected.length === 0 || entSelected.includes(scopedChild)
+          })
           .map((c) => c.value)
-          .filter((e) => entSelected.length === 0 || entSelected.includes(e))
-        map[root.value] = ents
+        if (ents.length > 0) {
+          map[root.value] = ents
+        }
       }
     })
     return Object.keys(map).length > 0 ? map : undefined

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pandas as pd
+import numpy as np
 from darts import TimeSeries
 
 from backend.schemas.training import TrainingRequest
@@ -541,105 +542,120 @@ def _run_segment_training(
         if parent_col:
             unique_parents = sorted(list({leaf.get(parent_col, "") for leaf in leaf_segments if leaf.get(parent_col)}))
 
-        total_steps = len(leaf_segments) + (len(unique_parents) if len(hierarchy_levels) > 1 else 0)
-        job.entity_progress_total = max(1, total_steps)
-        job.entity_progress_completed = 0
-
         target_months = [str(d)[:7] for d in forecast_dates]
         leaf_results: list[dict[str, Any]] = []
+        skipped_segments: list[dict[str, Any]] = []
 
-        # ── 5. Train candidate models for each leaf segment ─────────
-        for seg in leaf_segments:
+        # ── Optimization: If only 1 segment was selected, reuse Stage 1 aggregate results directly ──
+        if len(leaf_segments) == 1:
+            seg = leaf_segments[0]
             label = " • ".join(str(v) for v in seg.values())
             job.entity_current_segment = label
-            try:
-                seg_res = series_builder.build_aggregate_series(
-                    long_df=long_df,
-                    filters=request.filters or {},
-                    dimension_columns=dimension_columns,
-                    frequency=frequency,
-                    hierarchy_selections=[seg],
-                    target_column=target_col,
-                    target_value=target_val,
-                    train_start=request.train_start,
-                    train_end=request.train_end,
-                )
-                seg_ts = seg_res.total_series
-                n_seg_obs = len(seg_ts)
+            job.entity_progress_total = 1
+            job.entity_progress_completed = 1
 
-                if n_seg_obs < 3:
-                    mean_val = float(np.nanmean(seg_ts.values())) if len(seg_ts) > 0 and not np.isnan(np.nanmean(seg_ts.values())) else 0.0
-                    final_fc = {m: round(mean_val, 2) for m in target_months}
-                    leaf_results.append({
-                        "dims": seg,
-                        "label": label,
-                        "best_model": "NaiveMean",
-                        "mape": None,
-                        "forecast": final_fc,
-                    })
-                elif n_seg_obs < 13:
-                    from darts.models import NaiveMean
-                    with _warnings.catch_warnings():
-                        _warnings.simplefilter("ignore")
-                        base_model = NaiveMean()
-                        base_model.fit(seg_ts)
-                        fc_ts = base_model.predict(request.forecast_horizon)
-                        fc_pts = extract_series_points(fc_ts)
-                        fc_map = {p["date"][:7]: float(p["value"] or 0.0) for p in fc_pts}
-                        fc_vals = [float(p["value"] or 0.0) for p in fc_pts]
-                        final_fc = {}
-                        for idx, m in enumerate(target_months):
-                            if m in fc_map:
-                                final_fc[m] = round(fc_map[m], 2)
-                            elif idx < len(fc_vals):
-                                final_fc[m] = round(fc_vals[idx], 2)
-                            else:
-                                final_fc[m] = round(fc_vals[-1], 2) if fc_vals else 0.0
-                    leaf_results.append({
-                        "dims": seg,
-                        "label": label,
-                        "best_model": "NaiveMean",
-                        "mape": None,
-                        "forecast": final_fc,
-                    })
+            # Forecast points from aggregate Stage 1 model
+            f_rep = job.results.get("forecast_report", {}) if job.results else {}
+            forecast_points = f_rep.get("forecast", [])
+            fc_map = {str(pt.get("date", ""))[:7]: round(float(pt.get("value", 0.0) or 0.0), 2) for pt in forecast_points}
+            fc_vals = [round(float(pt.get("value", 0.0) or 0.0), 2) for pt in forecast_points]
+            final_fc = {}
+            for idx, m in enumerate(target_months):
+                if m in fc_map:
+                    final_fc[m] = fc_map[m]
+                elif idx < len(fc_vals):
+                    final_fc[m] = fc_vals[idx]
                 else:
-                    val_size = max(1, min(6, int(n_seg_obs * 0.25)))
-                    seg_train_ts = seg_ts[:-val_size]
-                    seg_val_ts = seg_ts[-val_size:]
-                    eligible = model_registry.filter_eligible_models(
-                        request.candidate_models,
-                        n_train_observations=len(seg_train_ts),
+                    final_fc[m] = fc_vals[-1] if fc_vals else 0.0
+
+            best_model_name = f_rep.get("best_model", "SelectedModel")
+            best_mape = f_rep.get("validation", {}).get("mape")
+
+            leaf_results = [{
+                "dims": seg,
+                "label": label,
+                "best_model": best_model_name,
+                "mape": best_mape,
+                "forecast": final_fc,
+            }]
+            skipped_segments = []
+        else:
+            total_steps = len(leaf_segments) + (len(unique_parents) if len(hierarchy_levels) > 1 else 0)
+            job.entity_progress_total = max(1, total_steps)
+            job.entity_progress_completed = 0
+
+            # ── 5. Train candidate models for each leaf segment ─────────
+            for seg in leaf_segments:
+                label = " • ".join(str(v) for v in seg.values())
+                job.entity_current_segment = label
+                try:
+                    seg_res = series_builder.build_aggregate_series(
+                        long_df=long_df,
+                        filters=request.filters or {},
+                        dimension_columns=dimension_columns,
+                        frequency=frequency,
+                        hierarchy_selections=[seg],
+                        target_column=target_col,
+                        target_value=target_val,
+                        train_start=request.train_start,
+                        train_end=request.train_end,
                     )
-                    if not eligible:
-                        if n_seg_obs < 3:
-                            mean_val = float(np.nanmean(seg_ts.values())) if len(seg_ts) > 0 and not np.isnan(np.nanmean(seg_ts.values())) else 0.0
-                            final_fc = {m: round(mean_val, 2) for m in target_months}
-                        else:
-                            from darts.models import NaiveMean
-                            with _warnings.catch_warnings():
-                                _warnings.simplefilter("ignore")
-                                base_model = NaiveMean()
-                                base_model.fit(seg_ts)
-                                fc_ts = base_model.predict(request.forecast_horizon)
-                                fc_pts = extract_series_points(fc_ts)
-                                fc_map = {p["date"][:7]: float(p["value"] or 0.0) for p in fc_pts}
-                                fc_vals = [float(p["value"] or 0.0) for p in fc_pts]
-                                final_fc = {}
-                                for idx, m in enumerate(target_months):
-                                    if m in fc_map:
-                                        final_fc[m] = round(fc_map[m], 2)
-                                    elif idx < len(fc_vals):
-                                        final_fc[m] = round(fc_vals[idx], 2)
-                                    else:
-                                        final_fc[m] = round(fc_vals[-1], 2) if fc_vals else 0.0
+                    seg_ts = seg_res.total_series
+                    raw_vals = seg_ts.values().flatten() if len(seg_ts) > 0 else []
+                    # Check valid observations: non-zero and non-NaN
+                    valid_count = int(sum(1 for v in raw_vals if v != 0.0 and not np.isnan(v)))
+
+                    # Rule: At least 4 historical data points required to train a forecast model
+                    if valid_count < 4:
+                        reason = f"Only {valid_count} non-zero historical data point{'s' if valid_count != 1 else ''} present (minimum required is 4)."
+                        skipped_segments.append({
+                            "segment": label,
+                            "dims": seg,
+                            "reason": reason,
+                            "valid_count": valid_count,
+                        })
+                        job.log(f"Segment '{label}' skipped from forecasting: {reason}")
+                        job.entity_progress_completed += 1
+                        continue
+
+                    n_seg_obs = len(seg_ts)
+                    if n_seg_obs < 14:
+                        # 4 to 13 observations: use ExponentialSmoothing directly (never NaiveMean/NaiveDrift)
+                        with _warnings.catch_warnings():
+                            _warnings.simplefilter("ignore")
+                            base_model = model_registry.create_model("ExponentialSmoothing")
+                            base_model.fit(seg_ts)
+                            fc_ts = base_model.predict(request.forecast_horizon)
+                            fc_pts = extract_series_points(fc_ts)
+                            fc_map = {p["date"][:7]: float(p["value"] or 0.0) for p in fc_pts}
+                            fc_vals = [float(p["value"] or 0.0) for p in fc_pts]
+                            final_fc = {}
+                            for idx, m in enumerate(target_months):
+                                if m in fc_map:
+                                    final_fc[m] = round(fc_map[m], 2)
+                                elif idx < len(fc_vals):
+                                    final_fc[m] = round(fc_vals[idx], 2)
+                                else:
+                                    final_fc[m] = round(fc_vals[-1], 2) if fc_vals else 0.0
                         leaf_results.append({
                             "dims": seg,
                             "label": label,
-                            "best_model": "NaiveMean",
+                            "best_model": "ExponentialSmoothing",
                             "mape": None,
                             "forecast": final_fc,
                         })
                     else:
+                        # 14+ observations: full tournament across eligible models (ML + Statistical)
+                        val_size = max(1, min(6, int(n_seg_obs * 0.25)))
+                        seg_train_ts = seg_ts[:-val_size]
+                        seg_val_ts = seg_ts[-val_size:]
+                        eligible = model_registry.filter_eligible_models(
+                            request.candidate_models,
+                            n_train_observations=len(seg_train_ts),
+                        )
+                        if not eligible:
+                            eligible = ["ExponentialSmoothing"]
+
                         with _warnings.catch_warnings():
                             _warnings.simplefilter("ignore")
                             c_res = model_training.evaluate_candidates(
@@ -676,66 +692,65 @@ def _run_segment_training(
                             "mape": best_mape,
                             "forecast": final_fc,
                         })
-            except Exception as exc:
-                job.log(f"Segment '{label}' notice: {exc}")
-                leaf_results.append({
-                    "dims": seg,
-                    "label": label,
-                    "best_model": "ConstantZero",
-                    "mape": None,
-                    "forecast": {m: 0.0 for m in target_months},
-                })
-
-            job.entity_progress_completed += 1
-
-        # ── 6. Parent evaluations (if multi-level) ───────────────────
-        parent_best_models: dict[str, dict[str, Any]] = {}
-        if len(hierarchy_levels) > 1 and parent_col:
-            for p in unique_parents:
-                job.entity_current_segment = f"{parent_col} {p}"
-                try:
-                    p_seg_res = series_builder.build_aggregate_series(
-                        long_df=long_df,
-                        filters=request.filters or {},
-                        dimension_columns=dimension_columns,
-                        frequency=frequency,
-                        hierarchy_selections=[{parent_col: p}],
-                        target_column=target_col,
-                        target_value=target_val,
-                        train_start=request.train_start,
-                        train_end=request.train_end,
-                    )
-                    p_ts = p_seg_res.total_series
-                    n_p_obs = len(p_ts)
-                    if n_p_obs >= 13:
-                        val_size = max(1, min(6, int(n_p_obs * 0.25)))
-                        p_train_ts = p_ts[:-val_size]
-                        p_val_ts = p_ts[-val_size:]
-                        eligible = model_registry.filter_eligible_models(
-                            request.candidate_models,
-                            n_train_observations=len(p_train_ts),
-                        )
-                        if eligible:
-                            with _warnings.catch_warnings():
-                                _warnings.simplefilter("ignore")
-                                c_res = model_training.evaluate_candidates(
-                                    model_names=eligible,
-                                    train_series=p_train_ts,
-                                    validation_series=p_val_ts,
-                                )
-                            best_cand = model_training.select_best(c_res)
-                            parent_best_models[p] = {
-                                "best_model": best_cand.model_name if best_cand else eligible[0],
-                                "mape": round(best_cand.mape, 2) if (best_cand and best_cand.mape is not None) else None,
-                            }
-                        else:
-                            parent_best_models[p] = {"best_model": "NaiveMean", "mape": None}
-                    else:
-                        parent_best_models[p] = {"best_model": "NaiveMean", "mape": None}
-                except Exception:
-                    parent_best_models[p] = {"best_model": "NaiveMean", "mape": None}
+                except Exception as exc:
+                    job.log(f"Segment '{label}' error: {exc}")
+                    skipped_segments.append({
+                        "segment": label,
+                        "dims": seg,
+                        "reason": f"Model fitting failed: {str(exc)}",
+                        "valid_count": 0,
+                    })
 
                 job.entity_progress_completed += 1
+
+            # ── 6. Parent evaluations (if multi-level) ───────────────────
+            parent_best_models: dict[str, dict[str, Any]] = {}
+            if len(hierarchy_levels) > 1 and parent_col and unique_parents and len(leaf_results) > 0:
+                for p in unique_parents:
+                    job.entity_current_segment = f"{parent_col} {p}"
+                    try:
+                        p_seg_res = series_builder.build_aggregate_series(
+                            long_df=long_df,
+                            filters=request.filters or {},
+                            dimension_columns=dimension_columns,
+                            frequency=frequency,
+                            hierarchy_selections=[{parent_col: p}],
+                            target_column=target_col,
+                            target_value=target_val,
+                            train_start=request.train_start,
+                            train_end=request.train_end,
+                        )
+                        p_ts = p_seg_res.total_series
+                        n_p_obs = len(p_ts)
+                        if n_p_obs >= 14:
+                            val_size = max(1, min(6, int(n_p_obs * 0.25)))
+                            p_train_ts = p_ts[:-val_size]
+                            p_val_ts = p_ts[-val_size:]
+                            eligible = model_registry.filter_eligible_models(
+                                request.candidate_models,
+                                n_train_observations=len(p_train_ts),
+                            )
+                            if eligible:
+                                with _warnings.catch_warnings():
+                                    _warnings.simplefilter("ignore")
+                                    c_res = model_training.evaluate_candidates(
+                                        model_names=eligible,
+                                        train_series=p_train_ts,
+                                        validation_series=p_val_ts,
+                                    )
+                                best_cand = model_training.select_best(c_res)
+                                parent_best_models[p] = {
+                                    "best_model": best_cand.model_name if best_cand else eligible[0],
+                                    "mape": round(best_cand.mape, 2) if (best_cand and best_cand.mape is not None) else None,
+                                }
+                            else:
+                                parent_best_models[p] = {"best_model": "ExponentialSmoothing", "mape": None}
+                        else:
+                            parent_best_models[p] = {"best_model": "ExponentialSmoothing", "mape": None}
+                    except Exception:
+                        parent_best_models[p] = {"best_model": "ExponentialSmoothing", "mape": None}
+
+                    job.entity_progress_completed += 1
 
         # ── 7. Monthly Hierarchy & Percentage Distribution ───────────
         hierarchy: list[dict[str, Any]] = []
@@ -834,6 +849,14 @@ def _run_segment_training(
                 "mape": l["mape"],
             })
 
+        if skipped_segments and job.results and "forecast_report" in job.results:
+            f_rep = job.results["forecast_report"]
+            if "warnings" not in f_rep:
+                f_rep["warnings"] = []
+            f_rep["warnings"].append(
+                f"{len(skipped_segments)} segment(s) were excluded from segment-wise reports due to insufficient historical observations (< 4 points)."
+            )
+
         job.entity_results = json_safe({
             "months": target_months,
             "hierarchy_levels": hierarchy_levels,
@@ -844,11 +867,13 @@ def _run_segment_training(
             "hierarchy": hierarchy,
             "entity_forecasts": segment_forecasts_list,
             "segment_forecasts": segment_forecasts_list,
+            "skipped_segments": skipped_segments,
             "total_segments": len(leaf_results),
+            "total_skipped": len(skipped_segments),
             "total_business_units": len(unique_parents) if len(hierarchy_levels) > 1 else len(leaf_results),
         })
         job.entity_status = "completed"
-        job.log(f"Segment-wise background training completed ({len(leaf_results)} segments across {len(hierarchy_levels)} hierarchy levels).")
+        job.log(f"Segment-wise background training completed ({len(leaf_results)} segments forecasted, {len(skipped_segments)} skipped).")
 
     except Exception as exc:
         import traceback

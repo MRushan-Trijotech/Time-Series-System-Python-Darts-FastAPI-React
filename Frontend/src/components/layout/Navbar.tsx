@@ -1,9 +1,16 @@
 import React from 'react'
 import { Activity, Database, RefreshCw } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { useSession } from '../../contexts/SessionContext'
 
 export const Navbar: React.FC = () => {
+  const navigate = useNavigate()
   const { filename, activeSheet, jobId, resetSession } = useSession()
+
+  const handleReset = () => {
+    resetSession()
+    navigate('/upload')
+  }
 
   return (
     <header className="h-14 border-b border-slate-200 bg-white px-6 flex items-center justify-between sticky top-0 z-30 shadow-xs">
@@ -39,9 +46,9 @@ export const Navbar: React.FC = () => {
         )}
 
         <button
-          onClick={resetSession}
-          className="text-xs text-slate-500 hover:text-slate-800 flex items-center gap-1.5 px-2.5 py-1 rounded border border-slate-200 hover:bg-slate-50 transition"
-          title="Reset current session"
+          onClick={handleReset}
+          className="text-xs text-slate-500 hover:text-slate-800 flex items-center gap-1.5 px-2.5 py-1 rounded border border-slate-200 hover:bg-slate-50 transition cursor-pointer"
+          title="Reset current session and return to upload"
         >
           <RefreshCw className="w-3 h-3" />
           <span>New Session</span>

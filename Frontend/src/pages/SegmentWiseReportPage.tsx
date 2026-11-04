@@ -40,6 +40,7 @@ export const SegmentWiseReportPage: React.FC = () => {
   // Filters & Controls
   const [searchQuery, setSearchQuery] = useState<string>('')
   const [expandedParents, setExpandedParents] = useState<Record<string, boolean>>({})
+  const [showSkippedDetails, setShowSkippedDetails] = useState<boolean>(false)
 
   // Poller for segment-wise training completion
   useEffect(() => {
@@ -427,16 +428,51 @@ export const SegmentWiseReportPage: React.FC = () => {
             </span>
           </div>
 
-          <div className="text-right sm:text-left">
+          {/* <div className="text-right sm:text-left">
             <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
               Grand Total Forecast
             </span>
             <span className="font-bold text-blue-700 font-mono text-sm">
               {formatNumber(tableData.grandTotal)}
             </span>
-          </div>
+          </div> */}
         </div>
       </div>
+
+      {/* Excluded / Skipped Segments Warning Banner */}
+      {reportData.data.skipped_segments && reportData.data.skipped_segments.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-xs space-y-2 shadow-2xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-amber-900 font-semibold">
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>
+                {reportData.data.skipped_segments.length} segment{reportData.data.skipped_segments.length > 1 ? 's were' : ' was'} excluded from forecasting due to insufficient historical observations (minimum 4 required).
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowSkippedDetails((prev) => !prev)}
+              className="text-amber-700 hover:text-amber-900 font-semibold underline text-left sm:text-right shrink-0"
+            >
+              {showSkippedDetails ? 'Hide excluded series' : 'View excluded series & reasons'}
+            </button>
+          </div>
+
+          {showSkippedDetails && (
+            <div className="mt-2 pt-2 border-t border-amber-200/80 max-h-48 overflow-y-auto space-y-1.5">
+              {reportData.data.skipped_segments.map((sk, idx) => (
+                <div
+                  key={idx}
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 bg-white/90 p-2 rounded border border-amber-200/70"
+                >
+                  <span className="font-semibold text-slate-800">{sk.segment}</span>
+                  <span className="text-[11px] text-amber-800 font-mono">{sk.reason}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Matrix Controls & Search */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -483,9 +519,9 @@ export const SegmentWiseReportPage: React.FC = () => {
                     {childLevelName}
                   </th>
                 )}
-                <th className="px-3 py-2.5 border-r border-slate-200 text-right min-w-[120px] bg-slate-100">
+                {/* <th className="px-3 py-2.5 border-r border-slate-200 text-right min-w-[120px] bg-slate-100">
                   Total
-                </th>
+                </th> */}
                 {months.map((m) => (
                   <th
                     key={m}
@@ -508,9 +544,9 @@ export const SegmentWiseReportPage: React.FC = () => {
                     (all)
                   </td>
                 )}
-                <td className="px-3 py-2.5 border-r border-blue-200 text-right text-blue-800 font-bold">
+                {/* <td className="px-3 py-2.5 border-r border-blue-200 text-right text-blue-800 font-bold">
                   {formatNumber(tableData.grandTotal)}
-                </td>
+                </td> */}
                 {months.map((m) => (
                   <td key={m} className="px-3 py-2.5 border-r border-blue-200 text-right">
                     {formatNumber(tableData.grandMonths[m])}
@@ -556,9 +592,9 @@ export const SegmentWiseReportPage: React.FC = () => {
                           Subtotal
                         </td>
                       )}
-                      <td className="px-3 py-2 border-r border-slate-200 text-right font-bold text-slate-800">
+                      {/* <td className="px-3 py-2 border-r border-slate-200 text-right font-bold text-slate-800">
                         {formatNumber(parentGroup.total)}
-                      </td>
+                      </td> */}
                       {months.map((m) => (
                         <td key={m} className="px-3 py-2 border-r border-slate-200 text-right">
                           {formatNumber(parentGroup.months[m])}
@@ -579,9 +615,9 @@ export const SegmentWiseReportPage: React.FC = () => {
                           <td className="px-3 py-1.5 border-r border-slate-200 sticky left-[200px] bg-white z-10 font-sans font-medium text-slate-800">
                             <span>{child.name}</span>
                           </td>
-                          <td className="px-3 py-1.5 border-r border-slate-200 text-right font-semibold text-slate-700">
+                          {/* <td className="px-3 py-1.5 border-r border-slate-200 text-right font-semibold text-slate-700">
                             {formatNumber(child.total)}
-                          </td>
+                          </td> */}
                           {months.map((m) => (
                             <td key={m} className="px-3 py-1.5 border-r border-slate-200 text-right">
                               {formatNumber(child.months[m])}

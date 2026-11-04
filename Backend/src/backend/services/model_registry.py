@@ -15,8 +15,6 @@ from darts.models import (
     AutoETS,
     ExponentialSmoothing,
     LinearRegressionModel,
-    NaiveDrift,
-    NaiveMean,
     NaiveSeasonal,
     Prophet,
     RandomForestModel,
@@ -45,26 +43,23 @@ except ImportError:
     _HAS_XGB = False
 
 # Minimum observations required for a model to run
+# ML models lowered from 25 to 14 so they participate on 18-24 month datasets
 MODEL_MIN_OBS: dict[str, int] = {
-    "NaiveMean": 2,
-    "NaiveDrift": 3,
     "NaiveSeasonal": 13,
     "ARIMA": 10,
     "AutoARIMA": 10,
     "ExponentialSmoothing": 3,
     "AutoETS": 10,
     "Prophet": 10,
-    "LinearRegressionModel": 25,
-    "RandomForestModel": 25,
-    "CatBoostModel": 25,
-    "LightGBMModel": 25,
-    "XGBModel": 25,
+    "LinearRegressionModel": 14,
+    "RandomForestModel": 14,
+    "CatBoostModel": 14,
+    "LightGBMModel": 14,
+    "XGBModel": 14,
 }
 
 # Model family description for display
 MODEL_FAMILY: dict[str, str] = {
-    "NaiveMean": "Baseline",
-    "NaiveDrift": "Baseline",
     "NaiveSeasonal": "Baseline",
     "ARIMA": "Statistical",
     "AutoARIMA": "Statistical",
@@ -81,8 +76,6 @@ MODEL_FAMILY: dict[str, str] = {
 
 def _build_registry() -> dict[str, Callable]:
     registry: dict[str, Callable] = {
-        "NaiveMean": lambda: NaiveMean(),
-        "NaiveDrift": lambda: NaiveDrift(),
         "NaiveSeasonal": lambda: NaiveSeasonal(K=12),
         "ARIMA": lambda: ARIMA(p=2, d=1, q=1),
         "AutoARIMA": lambda: AutoARIMA(
@@ -104,11 +97,9 @@ def _build_registry() -> dict[str, Callable]:
         ),
         "LinearRegressionModel": lambda: LinearRegressionModel(
             lags=12,
-            output_chunk_length=12,
         ),
         "RandomForestModel": lambda: RandomForestModel(
             lags=12,
-            output_chunk_length=12,
             n_estimators=200,
             max_depth=8,
             random_state=SEED,
@@ -119,7 +110,6 @@ def _build_registry() -> dict[str, Callable]:
     if _HAS_CATBOOST:
         registry["CatBoostModel"] = lambda: _CatBoostModel(
             lags=12,
-            output_chunk_length=12,
             iterations=300,
             depth=6,
             learning_rate=0.03,
@@ -130,7 +120,6 @@ def _build_registry() -> dict[str, Callable]:
     if _HAS_LIGHTGBM:
         registry["LightGBMModel"] = lambda: _LightGBMModel(
             lags=12,
-            output_chunk_length=12,
             n_estimators=200,
             learning_rate=0.03,
             max_depth=6,
@@ -141,7 +130,6 @@ def _build_registry() -> dict[str, Callable]:
     if _HAS_XGB:
         registry["XGBModel"] = lambda: _XGBModel(
             lags=12,
-            output_chunk_length=12,
             n_estimators=200,
             max_depth=5,
             learning_rate=0.03,
@@ -203,12 +191,9 @@ def filter_eligible_models(
         if n_train_observations >= min_obs:
             eligible.append(name)
 
-    # Always ensure at least one model can run so training never crashes on short series
-    if not eligible:
-        if n_train_observations >= 3:
-            eligible = ["ExponentialSmoothing", "NaiveDrift", "NaiveMean"]
-        elif n_train_observations >= 2:
-            eligible = ["NaiveMean"]
+    # Fallback only to ExponentialSmoothing if series has at least 3 points
+    if not eligible and n_train_observations >= 3:
+        eligible = ["ExponentialSmoothing"]
 
     return eligible
 

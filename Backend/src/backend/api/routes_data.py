@@ -3,7 +3,7 @@ import gc
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 
 from backend.config import settings
 from backend.schemas.dataset import (
@@ -739,4 +739,107 @@ async def get_series_info(dataset_id: str, req: SeriesInfoRequest):
         date_range_end=d_end,
         recommended_horizon=recommended,
         warnings=warnings_out,
+    )
+
+
+@router.get("/data/sample-template")
+async def download_sample_template():
+    """Generate and download a sample structure Excel file demonstrating split-header period and dimension format."""
+    import io
+    import random
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Story"
+
+    years = [2023, 2024]
+    months_abbr = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    # Header Row 1: Periods spread across columns
+    row1: list[Any] = [None, None, None, None, "Date"]
+    for y in years:
+        row1.append(str(y))
+        for q_idx in range(4):
+            row1.append(f"Q{q_idx+1} ({y})")
+            for m_idx in range(q_idx * 3, q_idx * 3 + 3):
+                row1.append(f"{months_abbr[m_idx]} ({y})")
+
+    # Header Row 2: Dimension column names starting from row 2
+    row2 = ["Business Unit", "SAC_Legal_Entity", "SAC_PRODUCT", "ACCOUNT", "Description"] + [None] * (len(row1) - 5)
+
+    ws.append(row1)
+    ws.append(row2)
+
+    # Sample rows with generic/anonymized values
+    samples = [
+        ("BU1", "1400", "Product1", "PL01", "Sales Revenue", 52000, 1200),
+        ("BU1", "1400", "Product2", "PL01", "Sales Revenue", 35000, 800),
+        ("BU1", "1600", "Product1", "PL01", "Sales Revenue", 62000, 1500),
+        ("BU1", "1600", "Product2", "PL01", "Sales Revenue", 41000, 950),
+        ("BU2", "1400", "Product1", "PL01", "Sales Revenue", 45000, 1100),
+        ("BU2", "1400", "Product3", "PL01", "Sales Revenue", 29000, 750),
+        ("BU2", "1800", "Product2", "PL01", "Sales Revenue", 38000, 900),
+        ("BU1", "1400", "Product1", "PL02", "Other Income", 1500, 50),
+        ("BU2", "1400", "Product1", "PL02", "Other Income", 1800, 60),
+    ]
+
+    rng = random.Random(42)
+
+    for bu, ent, prod, acc, desc, base_val, step in samples:
+        r: list[Any] = [bu, ent, prod, acc, desc]
+        val = float(base_val)
+        for y in years:
+            year_total_idx = len(r)
+            r.append(None)
+            y_sum = 0.0
+            for q_idx in range(4):
+                q_total_idx = len(r)
+                r.append(None)
+                q_sum = 0.0
+                for m in range(3):
+                    m_val = round(val + rng.uniform(-step, step), 2)
+                    q_sum += m_val
+                    r.append(m_val)
+                    val += step * 0.05
+                y_sum += q_sum
+                r[q_total_idx] = round(q_sum, 2)
+            r[year_total_idx] = round(y_sum, 2)
+        ws.append(r)
+
+    # Apply styling: bold headers and soft fills
+    header_font = Font(name="Calibri", size=11, bold=True, color="1E293B")
+    dim_fill = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
+    period_fill = PatternFill(start_color="E0F2FE", end_color="E0F2FE", fill_type="solid")
+
+    for col_idx in range(1, len(row1) + 1):
+        cell1 = ws.cell(row=1, column=col_idx)
+        cell2 = ws.cell(row=2, column=col_idx)
+        if cell1.value is not None:
+            cell1.font = header_font
+            cell1.fill = period_fill
+            cell1.alignment = Alignment(horizontal="center", vertical="center")
+        if cell2.value is not None:
+            cell2.font = header_font
+            cell2.fill = dim_fill
+            cell2.alignment = Alignment(horizontal="left", vertical="center")
+
+    # Auto-adjust column widths for readability
+    for col in ws.columns:
+        max_len = 0
+        col_letter = col[0].column_letter
+        for cell in col[:15]:
+            if cell.value is not None:
+                max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    excel_bytes = bio.getvalue()
+
+    return Response(
+        content=excel_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=sample_timeseries_structure.xlsx"},
     )

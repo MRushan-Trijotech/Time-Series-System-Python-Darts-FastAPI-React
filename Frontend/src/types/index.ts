@@ -267,6 +267,13 @@ export interface EntityForecastItem {
   mape?: number | null
 }
 
+export interface SkippedSegment {
+  segment: string
+  dims?: Record<string, string>
+  reason: string
+  valid_count: number
+}
+
 export interface EntityWiseReportData {
   months: string[]
   hierarchy_levels?: string[]
@@ -275,6 +282,8 @@ export interface EntityWiseReportData {
   hierarchy: EntityWiseMonth[]
   entity_forecasts?: EntityForecastItem[]
   segment_forecasts?: EntityForecastItem[]
+  skipped_segments?: SkippedSegment[]
+  total_skipped?: number
   target_account?: string
   target_description?: string
   total_segments: number
